@@ -27,11 +27,14 @@ type Router struct {
 	Next      string `json:"next"`
 }
 
-// StepRecord stores per-step timing info for the summary table.
+// StepRecord stores per-step timing and token metrics for the summary table.
 type StepRecord struct {
 	Step    int
 	Agent   string
 	Elapsed time.Duration
+	Tokens  int           // completion tokens (0 for non-streaming calls)
+	TTFT    time.Duration // time to first token
+	GenTime time.Duration // generation time after first token
 }
 
 // Citation is a web search source extracted from grounding metadata.

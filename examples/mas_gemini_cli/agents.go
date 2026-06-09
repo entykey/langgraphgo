@@ -36,7 +36,7 @@ func supervisorNode(gemini *GeminiClient) func(context.Context, AgentState) (Age
 		if state.Step > maxSteps {
 			fmt.Println("  ⚠️  maxSteps reached → force FINISH")
 			elapsed := time.Since(t0)
-			state.Records = append(state.Records, StepRecord{state.Step, "supervisor(max)", elapsed})
+			state.Records = append(state.Records, StepRecord{Step: state.Step, Agent: "supervisor(max)", Elapsed: elapsed})
 			state.Next = "FINISH"
 			fmt.Printf("  └─ done: %.2fs\n╚═══════════════════════════════════════════════════════╝\n", elapsed.Seconds())
 			return state, nil
@@ -50,9 +50,9 @@ func supervisorNode(gemini *GeminiClient) func(context.Context, AgentState) (Age
 
 		decision := router.Next
 		hint := router.Reasoning
-		if len(hint) > 100 {
-			hint = hint[:100] + "..."
-		}
+		// if len(hint) > 100 {
+		// 	hint = hint[:100] + "..."
+		// }
 		fmt.Printf("  │  → %q | %s\n", decision, hint)
 
 		// ── Anti-loop ────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ func supervisorNode(gemini *GeminiClient) func(context.Context, AgentState) (Age
 		}
 
 		state.Next = decision
-		state.Records = append(state.Records, StepRecord{state.Step, "supervisor→route", elapsed})
+		state.Records = append(state.Records, StepRecord{Step: state.Step, Agent: "supervisor→route", Elapsed: elapsed})
 		fmt.Printf("  └─ done: %.2fs\n╚═══════════════════════════════════════════════════════╝\n", elapsed.Seconds())
 		return state, nil
 	}
@@ -116,7 +116,7 @@ func selfReplyNode(gemini *GeminiClient) func(context.Context, AgentState) (Agen
 		t0 := time.Now()
 		fmt.Printf("\n🤖 [Supervisor]\n")
 
-		text, err := gemini.StreamChat(ctx, chatSystem, state.Messages)
+		text, metrics, err := gemini.StreamChat(ctx, chatSystem, state.Messages)
 		elapsed := time.Since(t0)
 		if err != nil {
 			return state, fmt.Errorf("self-reply: %w", err)
@@ -127,8 +127,11 @@ func selfReplyNode(gemini *GeminiClient) func(context.Context, AgentState) (Agen
 			Content: text,
 			Name:    "supervisor",
 		})
-		state.Records = append(state.Records, StepRecord{state.Step, "supervisor(self)", elapsed})
-		fmt.Printf("  done: %.2fs\n", elapsed.Seconds())
+		state.Records = append(state.Records, StepRecord{
+			Step: state.Step, Agent: "supervisor(self)", Elapsed: elapsed,
+			Tokens: metrics.Tokens, TTFT: metrics.TTFT, GenTime: metrics.GenTime,
+		})
+		logMetrics(elapsed, metrics)
 		return state, nil
 	}
 }
@@ -174,9 +177,18 @@ func webSearchNode(gemini *GeminiClient) func(context.Context, AgentState) (Agen
 			Name:    "web_search",
 		})
 		state.CallCount["web_search"]++
-		state.Records = append(state.Records, StepRecord{state.Step, "web_search", elapsed})
+		state.Records = append(state.Records, StepRecord{Step: state.Step, Agent: "web_search", Elapsed: elapsed})
 		fmt.Printf("  done: %.2fs\n", elapsed.Seconds())
 		return state, nil
+	}
+}
+
+func logMetrics(elapsed time.Duration, m StreamMetrics) {
+	if m.Tokens > 0 {
+		fmt.Printf("  done: %.2fs  |  TTFT: %dms  |  gen: %.2fs  |  %d tok  |  %.1f tok/s\n",
+			elapsed.Seconds(), m.TTFT.Milliseconds(), m.GenTime.Seconds(), m.Tokens, m.TokPerSec)
+	} else {
+		fmt.Printf("  done: %.2fs\n", elapsed.Seconds())
 	}
 }
 
@@ -197,7 +209,7 @@ func makeAgentNode(gemini *GeminiClient, name string) func(context.Context, Agen
 			state.CallCount = make(map[string]int)
 		}
 
-		text, err := gemini.StreamChat(ctx, prompt, state.Messages)
+		text, metrics, err := gemini.StreamChat(ctx, prompt, state.Messages)
 		elapsed := time.Since(t0)
 		if err != nil {
 			return state, fmt.Errorf("%s: %w", name, err)
@@ -209,8 +221,11 @@ func makeAgentNode(gemini *GeminiClient, name string) func(context.Context, Agen
 			Name:    name,
 		})
 		state.CallCount[name]++
-		state.Records = append(state.Records, StepRecord{state.Step, name, elapsed})
-		fmt.Printf("  done: %.2fs\n", elapsed.Seconds())
+		state.Records = append(state.Records, StepRecord{
+			Step: state.Step, Agent: name, Elapsed: elapsed,
+			Tokens: metrics.Tokens, TTFT: metrics.TTFT, GenTime: metrics.GenTime,
+		})
+		logMetrics(elapsed, metrics)
 		return state, nil
 	}
 }

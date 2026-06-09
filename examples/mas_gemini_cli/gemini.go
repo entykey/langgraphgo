@@ -9,10 +9,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const (
-	geminiModel = "gemini-2.0-flash"
+	geminiModel = "gemini-3.1-flash-lite"
 	geminiBase  = "https://generativelanguage.googleapis.com/v1beta/models/" + geminiModel
 )
 
@@ -50,12 +51,25 @@ type gGroundingMeta struct {
 	} `json:"groundingChunks"`
 }
 
+type gUsageMeta struct {
+	CandidatesTokenCount int `json:"candidatesTokenCount"`
+}
+
 type gResponse struct {
-	Candidates []gCandidate `json:"candidates"`
-	Error      *struct {
+	Candidates    []gCandidate `json:"candidates"`
+	UsageMetadata *gUsageMeta  `json:"usageMetadata,omitempty"`
+	Error         *struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
+}
+
+// StreamMetrics holds latency/throughput stats captured during a streaming call.
+type StreamMetrics struct {
+	TTFT      time.Duration // request start → first content token (includes network)
+	GenTime   time.Duration // first token → stream end
+	Tokens    int           // candidatesTokenCount from usageMetadata
+	TokPerSec float64       // Tokens / GenTime
 }
 
 // ── GeminiClient ─────────────────────────────────────────────────────────────
@@ -128,55 +142,6 @@ func (c *GeminiClient) callAPI(ctx context.Context, req gRequest) (*gResponse, e
 	return &gr, nil
 }
 
-// callStream sends a streaming SSE request to :streamGenerateContent and
-// forwards each text chunk to the provided channel.
-func (c *GeminiClient) callStream(ctx context.Context, req gRequest, ch chan<- string) error {
-	b, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-	url := geminiBase + ":streamGenerateContent?alt=sse&key=" + c.apiKey
-	hr, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	hr.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(hr)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		d, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("stream API %d: %s", resp.StatusCode, string(d))
-	}
-
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 1<<20), 1<<20)
-	for sc.Scan() {
-		line := sc.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		payload := strings.TrimPrefix(line, "data: ")
-		if payload == "[DONE]" {
-			break
-		}
-		var gr gResponse
-		if json.Unmarshal([]byte(payload), &gr) != nil {
-			continue
-		}
-		if len(gr.Candidates) > 0 && len(gr.Candidates[0].Content.Parts) > 0 {
-			if t := gr.Candidates[0].Content.Parts[0].Text; t != "" {
-				ch <- t
-			}
-		}
-	}
-	return sc.Err()
-}
-
 // ── Public high-level methods ─────────────────────────────────────────────────
 
 // RouteJSON calls the Gemini API with JSON response mode and parses the
@@ -238,26 +203,92 @@ func (c *GeminiClient) RouteJSON(ctx context.Context, messages []Message) (Route
 }
 
 // StreamChat calls Gemini with streaming SSE, prints each token to stdout in
-// real-time, and returns the fully assembled response string.
-func (c *GeminiClient) StreamChat(ctx context.Context, systemPrompt string, messages []Message) (string, error) {
-	ch := make(chan string, 512)
-	errc := make(chan error, 1)
-	go func() {
-		errc <- c.callStream(ctx, gRequest{
-			Contents:          c.buildContents(messages),
-			SystemInstruction: c.sysContent(systemPrompt),
-		}, ch)
-		close(ch)
-	}()
+// real-time, and returns the assembled text plus performance metrics.
+//
+// TTFT is measured from the moment the HTTP request is sent, so it includes
+// the full network round-trip to Gemini's servers.
+func (c *GeminiClient) StreamChat(ctx context.Context, systemPrompt string, messages []Message) (string, StreamMetrics, error) {
+	req := gRequest{
+		Contents:          c.buildContents(messages),
+		SystemInstruction: c.sysContent(systemPrompt),
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return "", StreamMetrics{}, err
+	}
+	url := geminiBase + ":streamGenerateContent?alt=sse&key=" + c.apiKey
+	hr, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
+	if err != nil {
+		return "", StreamMetrics{}, err
+	}
+	hr.Header.Set("Content-Type", "application/json")
+
+	tRequest := time.Now()
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		return "", StreamMetrics{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		return "", StreamMetrics{}, fmt.Errorf("stream API %d: %s", resp.StatusCode, string(d))
+	}
+
+	var (
+		sb          strings.Builder
+		tFirstToken time.Time
+		tEnd        time.Time
+		compTokens  int
+	)
 
 	fmt.Println()
-	var sb strings.Builder
-	for tok := range ch {
-		fmt.Print(tok)
-		sb.WriteString(tok)
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			tEnd = time.Now()
+			break
+		}
+		var gr gResponse
+		if json.Unmarshal([]byte(payload), &gr) != nil {
+			continue
+		}
+		if gr.UsageMetadata != nil && gr.UsageMetadata.CandidatesTokenCount > 0 {
+			compTokens = gr.UsageMetadata.CandidatesTokenCount
+		}
+		if len(gr.Candidates) > 0 && len(gr.Candidates[0].Content.Parts) > 0 {
+			if tok := gr.Candidates[0].Content.Parts[0].Text; tok != "" {
+				if tFirstToken.IsZero() {
+					tFirstToken = time.Now()
+				}
+				fmt.Print(tok)
+				sb.WriteString(tok)
+			}
+		}
 	}
 	fmt.Println()
-	return sb.String(), <-errc
+
+	if tEnd.IsZero() {
+		tEnd = time.Now()
+	}
+
+	var m StreamMetrics
+	if !tFirstToken.IsZero() {
+		m.TTFT = tFirstToken.Sub(tRequest)
+		m.GenTime = tEnd.Sub(tFirstToken)
+		m.Tokens = compTokens
+		if m.GenTime > 0 && compTokens > 0 {
+			m.TokPerSec = float64(compTokens) / m.GenTime.Seconds()
+		}
+	}
+
+	return sb.String(), m, sc.Err()
 }
 
 // WebSearch calls Gemini with the googleSearch grounding tool (non-streaming).
