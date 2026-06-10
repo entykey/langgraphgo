@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🤝 MAS Lab — Go</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0f0f0f;
+    --surface:  #1a1a1a;
+    --surface2: #242424;
+    --border:   #2e2e2e;
+    --text:     #e8e8e8;
+    --muted:    #888;
+    --accent:   #7c6af7;
+    --radius:   12px;
+    --font:     -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono:     "JetBrains Mono", "Fira Code", monospace;
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 15px; }
+  .layout { display: flex; flex-direction: column; height: 100vh; max-width: 860px; margin: 0 auto; }
+
+  /* Header */
+  .header { padding: 16px 20px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .header h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .config-bar { font-size: 12px; color: var(--muted); }
+  .config-bar span { color: var(--accent); }
+
+  /* Messages */
+  .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .messages::-webkit-scrollbar { width: 4px; }
+  .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* Inline flow indicator (supervisor routing, before any bubble) */
+  .flow-indicator {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px; color: var(--muted); font-size: 12px;
+  }
+
+  /* Message row */
+  .msg { display: flex; gap: 10px; }
+  .msg.user { flex-direction: row-reverse; }
+  .avatar {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; flex-shrink: 0; align-self: flex-start; margin-top: 2px;
+  }
+  .msg.user .avatar { background: #1e3a5f; }
+  .msg.ai   .avatar { background: #2d1f4e; }
+  .bubble { max-width: 78%; }
+
+  /* ── Bubble anatomy ───────────────────────────────────────────────────────── */
+  /* infobar — spinner + label, top of bubble while waiting */
+  .bubble-infobar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 16px;
+    background: var(--surface);
+    border-radius: var(--radius) var(--radius) 0 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px; color: var(--muted);
+  }
+  .bubble-infobar.hidden { display: none; }
+
+  /* content area — stacks text & tool-chip rows in SSE order */
+  .bubble-content {
+    background: var(--surface);
+    overflow: hidden;          /* clip to radius below */
+  }
+  /* round bottom only when there's no infobar sibling visible above */
+  .bubble-infobar.hidden + .bubble-content,
+  .bubble-content:first-child {
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+  .bubble-meta:empty ~ * { display: none; }  /* guard */
+
+  /* text block */
+  .content-text {
+    padding: 12px 16px;
+    line-height: 1.6; word-break: break-word;
+  }
+  .content-text:empty { display: none; }
+
+  /* tool-chips row — inline between text blocks, exact SSE position */
+  .content-tools {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 7px 14px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .content-tools:first-child { border-top: none; }
+
+  .tool-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; font-family: var(--mono);
+    color: #93c5fd; background: rgba(96,165,250,.08);
+    border: 1px solid rgba(96,165,250,.18);
+    border-radius: 6px; padding: 2px 8px;
+  }
+
+  /* Markdown styles (apply inside .content-text) */
+  .content-text p  { margin: 0 0 .6em; }
+  .content-text p:last-child { margin-bottom: 0; }
+  .content-text h1,.content-text h2,.content-text h3 { margin: .8em 0 .3em; font-size: 1em; font-weight: 600; }
+  .content-text ul,.content-text ol { padding-left: 1.4em; margin: .4em 0; }
+  .content-text li { margin: .15em 0; }
+  .content-text pre { background: var(--surface2); border-radius: 6px; padding: 10px; overflow-x: auto; margin: .6em 0; }
+  .content-text code { font-family: var(--mono); font-size: .85em; }
+  .content-text p > code { background: var(--surface2); padding: 1px 5px; border-radius: 4px; }
+  .content-text table { border-collapse: collapse; width: 100%; margin: .6em 0; font-size: .9em; }
+  .content-text th { background: var(--surface2); font-weight: 600; }
+  .content-text th,.content-text td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  .content-text tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+  .content-text a { color: var(--accent); }
+  .content-text strong { font-weight: 600; }
+
+  /* meta row */
+  .bubble-meta {
+    background: var(--surface);
+    border-radius: 0 0 var(--radius) 4px;
+    padding: 6px 14px 8px;
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  }
+  .bubble-meta:empty { padding: 0; }
+
+  /* user bubble (simple, no content area) */
+  .msg.user .bubble-body {
+    padding: 12px 16px;
+    background: #1e2a3a;
+    border-radius: var(--radius) var(--radius) 4px var(--radius);
+    line-height: 1.6; word-break: break-word;
+  }
+
+  /* badges */
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; color: var(--muted);
+    background: var(--surface2); border-radius: 20px; padding: 2px 8px;
+  }
+  .badge.agent-supervisor { color: #a78bfa; }
+  .badge.agent-json_agent { color: #60a5fa; }
+  .badge.agent-web_search { color: #34d399; }
+  .badge.ttft { color: #9ca3af; font-family: var(--mono); letter-spacing: -.3px; }
+  .badge.reasoning { color: #6b7280; font-style: italic; max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+
+  /* streaming cursor */
+  .cursor::after { content: "▋"; animation: blink .7s step-end infinite; color: var(--accent); }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* thinking dots */
+  .thinking-dots { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+  .thinking-dots span {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
+    animation: tdot 1.2s ease-in-out infinite;
+  }
+  .thinking-dots span:nth-child(2) { animation-delay: .2s; }
+  .thinking-dots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes tdot { 0%,60%,100%{transform:translateY(0);opacity:.35} 30%{transform:translateY(-5px);opacity:1} }
+
+  .spinner { width: 11px; height: 11px; border: 1.5px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; flex-shrink: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Input */
+  .input-area { padding: 12px 20px 20px; flex-shrink: 0; display: flex; gap: 10px; }
+  .input-area input {
+    flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--text); padding: 10px 16px; font-size: 14px; font-family: var(--font);
+    outline: none; transition: border-color .15s;
+  }
+  .input-area input:focus { border-color: var(--accent); }
+  .input-area button {
+    background: var(--accent); color: #fff; border: none; border-radius: var(--radius);
+    padding: 10px 20px; font-size: 14px; cursor: pointer; font-weight: 500; transition: opacity .15s;
+    white-space: nowrap;
+  }
+  .input-area button:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* Empty state */
+  .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 14px; }
+  .empty-state h2 { font-size: 24px; color: var(--text); }
+  .empty-state .hints { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }
+  .hint-chip {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 20px;
+    padding: 5px 12px; font-size: 12px; cursor: pointer; transition: border-color .15s;
+  }
+  .hint-chip:hover { border-color: var(--accent); color: var(--text); }
+
+  /* Context window panel */
+  .ctx-panel { border-top: 1px solid var(--border); padding: 7px 20px 9px; flex-shrink: 0; font-size: 11px; }
+  .ctx-header {
+    display: flex; align-items: center; justify-content: space-between;
+    cursor: pointer; user-select: none; margin-bottom: 5px;
+  }
+  .ctx-title { color: var(--muted); font-family: var(--mono); letter-spacing: -.2px; }
+  .ctx-title strong { color: #c4b5fd; font-weight: 500; }
+  .ctx-toggle { color: var(--muted); font-size: 10px; }
+  .ctx-bar-track {
+    height: 10px; background: var(--surface2); border-radius: 5px;
+    overflow: hidden; display: flex; margin-bottom: 6px; gap: 1px;
+  }
+  .ctx-seg { height: 100%; transition: width .25s ease; flex-shrink: 0; }
+  .ctx-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  .ctx-legend-item {
+    display: inline-flex; align-items: center; gap: 5px;
+    color: var(--muted); font-family: var(--mono);
+  }
+  .ctx-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .ctx-val { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <header class="header">
+    <h1>🤝 Multi-Agent Supervisor Handoff — Go + LangGraphGo</h1>
+    <div class="config-bar" id="config-bar">Đang tải...</div>
+  </header>
+
+  <div class="messages" id="messages">
+    <div class="empty-state" id="empty-state">
+      <h2>🤝</h2>
+      <div>Hỏi bất cứ điều gì — supervisor sẽ điều phối đúng agent</div>
+      <div class="hints">
+        <span class="hint-chip" onclick="fillInput(this)">Danh sách tất cả users?</span>
+        <span class="hint-chip" onclick="fillInput(this)">User 5 có bao nhiêu todos?</span>
+        <span class="hint-chip" onclick="fillInput(this)">Post 3 có những comments gì?</span>
+        <span class="hint-chip" onclick="fillInput(this)">Hôm nay giá vàng bao nhiêu?</span>
+        <span class="hint-chip" onclick="fillInput(this)">Xin chào, tôi là Tuấn</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="ctx-panel" id="ctx-panel">
+    <div class="ctx-header" id="ctx-toggle-btn">
+      <span class="ctx-title">Context Window · <strong id="ctx-label">—</strong></span>
+      <span class="ctx-toggle" id="ctx-chevron">▾</span>
+    </div>
+    <div id="ctx-body">
+      <div class="ctx-bar-track" id="ctx-bar"></div>
+      <div class="ctx-legend" id="ctx-legend"></div>
+    </div>
+  </div>
+
+  <form class="input-area" id="form" autocomplete="off">
+    <input id="input" placeholder="Hỏi gì đó..." />
+    <button type="submit" id="send-btn">Gửi</button>
+  </form>
+</div>
+
+<script>
+marked.setOptions({ breaks: true, gfm: true });
+
+const SESSION_KEY = "mas_go_session";
+let sessionId = localStorage.getItem(SESSION_KEY) || crypto.randomUUID();
+localStorage.setItem(SESSION_KEY, sessionId);
+
+let history = [];
+let config  = { supervisor: "?", json_agent: "?", search: "?" };
+
+fetch("/config").then(r => r.json()).then(c => {
+  config = c;
+  document.getElementById("config-bar").innerHTML =
+    `Supervisor <span>${c.supervisor}</span> → json_agent <span>${c.json_agent}</span> · web_search <span>${c.search}</span>`;
+});
+
+const $msgs  = document.getElementById("messages");
+const $input = document.getElementById("input");
+const $btn   = document.getElementById("send-btn");
+const $empty = document.getElementById("empty-state");
+
+// ── Inline flow indicator ────────────────────────────────────────────────────
+let $flow = null;
+function showFlow(text) {
+  if (!$flow) { $flow = document.createElement("div"); $flow.className = "flow-indicator"; $msgs.appendChild($flow); }
+  $flow.innerHTML = `<div class="thinking-dots"><span></span><span></span><span></span></div><span>${escHtml(text)}</span>`;
+  scrollBottom();
+}
+function hideFlow() { if ($flow) { $flow.remove(); $flow = null; } }
+
+// ── Bubble factory ───────────────────────────────────────────────────────────
+function createAiBubble(infoLabel) {
+  hideFlow();
+  const el = document.createElement("div");
+  el.className = "msg ai";
+  el.innerHTML = `
+    <div class="avatar">🤖</div>
+    <div class="bubble">
+      <div class="bubble-infobar">
+        <div class="spinner"></div>
+        <span class="infobar-label">${escHtml(infoLabel)}</span>
+      </div>
+      <div class="bubble-content"></div>
+      <div class="bubble-meta"></div>
+    </div>`;
+  $msgs.appendChild(el);
+  scrollBottom();
+  return el;
+}
+
+function setInfobar(bubble, text) {
+  const lb = bubble.querySelector(".infobar-label");
+  if (lb) lb.textContent = text;
+}
+
+function hideInfobar(bubble) {
+  bubble.querySelector(".bubble-infobar")?.classList.add("hidden");
+}
+
+// ── Content block helpers ────────────────────────────────────────────────────
+function getTextBlock(bubble) {
+  const content = bubble.querySelector(".bubble-content");
+  const last = content.lastElementChild;
+  if (!last || last.classList.contains("content-tools")) {
+    const block = document.createElement("div");
+    block.className = "content-text cursor";
+    content.appendChild(block);
+    return block;
+  }
+  return last;
+}
+
+function addToolChip(bubble, name) {
+  if (!bubble) return;
+  hideInfobar(bubble);
+  const content = bubble.querySelector(".bubble-content");
+  const last = content.lastElementChild;
+
+  if (last && last.classList.contains("content-text")) {
+    last.classList.remove("cursor");
+  }
+
+  let toolsRow;
+  if (last && last.classList.contains("content-tools")) {
+    toolsRow = last;
+  } else {
+    toolsRow = document.createElement("div");
+    toolsRow.className = "content-tools";
+    content.appendChild(toolsRow);
+  }
+
+  const chip = document.createElement("span");
+  chip.className = "tool-chip";
+  chip.textContent = `🔧 ${name}`;
+  toolsRow.appendChild(chip);
+  scrollBottom();
+}
+
+// ── Text rendering ────────────────────────────────────────────────────────────
+function renderMd(block, markdown) {
+  block._raw = markdown;
+  block.innerHTML = DOMPurify.sanitize(marked.parse(markdown));
+}
+
+function appendToken(bubble, token) {
+  hideInfobar(bubble);
+  const block = getTextBlock(bubble);
+  renderMd(block, (block._raw || "") + token);
+  scrollBottom();
+}
+
+function setBatchText(bubble, text) {
+  hideInfobar(bubble);
+  const block = getTextBlock(bubble);
+  renderMd(block, text);
+  scrollBottom();
+}
+
+function finishBubble(bubble, agent, citations, ttft, reasoning) {
+  bubble.querySelectorAll(".content-text.cursor").forEach(b => b.classList.remove("cursor"));
+  hideInfobar(bubble);
+  const meta = bubble.querySelector(".bubble-meta");
+
+  if (ttft != null) {
+    const t = document.createElement("span");
+    t.className = "badge ttft";
+    t.textContent = `TTFT ${ttft}s`;
+    meta.appendChild(t);
+  }
+  if (agent) {
+    const labels = {
+      supervisor: `🧠 supervisor — ${config.supervisor} self-reply`,
+      json_agent:  `📦 json_agent — ${config.json_agent}`,
+      web_search:  `🌐 web_search — ${config.search} Grounding`,
+    };
+    const b = document.createElement("span");
+    b.className = `badge agent-${agent}`;
+    b.textContent = labels[agent] || agent;
+    meta.appendChild(b);
+  }
+  if (reasoning) {
+    const r = document.createElement("span");
+    r.className = "badge reasoning";
+    r.title = reasoning; // full text on hover
+    r.textContent = `💬 ${reasoning}`;
+    meta.appendChild(r);
+  }
+  if (citations > 0) {
+    const c = document.createElement("span");
+    c.className = "badge";
+    c.textContent = `📎 ${citations} citations`;
+    meta.appendChild(c);
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function scrollBottom() { $msgs.scrollTop = $msgs.scrollHeight; }
+function escHtml(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function setInputDisabled(v) { $input.disabled = v; $btn.disabled = v; }
+function fillInput(el) { $input.value = el.textContent; $input.focus(); }
+
+function addUserBubble(text) {
+  const el = document.createElement("div");
+  el.className = "msg user";
+  el.innerHTML = `<div class="avatar">🙋</div><div class="bubble"><div class="bubble-body">${escHtml(text)}</div></div>`;
+  $msgs.appendChild(el);
+  scrollBottom();
+}
+
+// ── SSE parser ────────────────────────────────────────────────────────────────
+function parseSse(buf) {
+  const events = [];
+  for (const block of buf.split(/\n\n+/)) {
+    if (!block.trim()) continue;
+    let type = "message", dataStr = "";
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event: ")) type = line.slice(7).trim();
+      if (line.startsWith("data: "))  dataStr = line.slice(6).trim();
+    }
+    if (!dataStr) continue;
+    try { events.push({ type, data: JSON.parse(dataStr) }); }
+    catch { events.push({ type, data: { text: dataStr } }); }
+  }
+  return events;
+}
+
+// ── Context window inspector ─────────────────────────────────────────────────
+// Actual context window limits (tokens): DeepSeek v4-flash 64K, Gemini 64K–1M
+const CTX_LIMIT = { supervisor: 1024*1024, json_agent: 64*1024, web_search: 1024*1024 };
+// Model labels shown in the bar header
+const CTX_MODEL = { supervisor: 'gemini-3.1-flash-lite · 1M', json_agent: 'deepseek-v4-flash · 64K', web_search: 'gemini-3.1-flash-lite · 1M' };
+// Estimated system prompt sizes in tokens
+const CTX_SYS   = { supervisor: 160, json_agent: 220, web_search: 100 };
+const CTX_COLOR = {
+  sys:     '#6366f1',   // indigo  — system prompt
+  history: '#f59e0b',   // amber   — conversation history
+  tools:   '#10b981',   // emerald — tool calls + results
+  output:  '#ec4899',   // pink    — current output
+};
+
+const ctxBar = (() => {
+  const $label  = document.getElementById('ctx-label');
+  const $bar    = document.getElementById('ctx-bar');
+  const $legend = document.getElementById('ctx-legend');
+  document.getElementById('ctx-toggle-btn').addEventListener('click', () => {
+    const b = document.getElementById('ctx-body');
+    const c = document.getElementById('ctx-chevron');
+    const hidden = b.style.display === 'none';
+    b.style.display = hidden ? '' : 'none';
+    c.textContent   = hidden ? '▾' : '▸';
+  });
+
+  // Chars → rough token estimate (mixed VI/EN: ~3 chars/token)
+  function c2t(ch) { return Math.max(0, Math.round(ch / 3)); }
+  function fmtT(t) { return t >= 1000 ? (t / 1024).toFixed(1) + 'K' : String(t); }
+
+  const st = { agent: 'supervisor', toolChars: 0, outputChars: 0 };
+
+  function render() {
+    const limit   = CTX_LIMIT[st.agent] || 64*1024;
+    const sysTok  = CTX_SYS[st.agent]   || 120;
+    const histTok = c2t(history.reduce((s, m) => s + (m.content || '').length, 0));
+    const toolTok = c2t(st.toolChars);
+    const outTok  = c2t(st.outputChars);
+    const total   = sysTok + histTok + toolTok + outTok;
+    const pct     = (total / limit * 100).toFixed(2);
+    const model   = CTX_MODEL[st.agent] || st.agent;
+
+    $label.textContent = `${model} · ${fmtT(total)} / ${fmtT(limit)} tok · ${pct}%`;
+
+    const segs = [
+      { tok: sysTok,  color: CTX_COLOR.sys,     name: 'System'  },
+      { tok: histTok, color: CTX_COLOR.history,  name: 'History' },
+      { tok: toolTok, color: CTX_COLOR.tools,    name: 'Tools'   },
+      { tok: outTok,  color: CTX_COLOR.output,   name: 'Output'  },
+    ];
+
+    // For very large context windows (Gemini 1M) the used slice is tiny.
+    // Scale the bar so it always shows against a 10% reference band so the
+    // filled portion is still visible, but label the actual %.
+    const displayLimit = Math.max(limit, total * 10);
+
+    $bar.innerHTML = segs.map(s => {
+      const w = (s.tok / displayLimit * 100).toFixed(3);
+      return `<div class="ctx-seg" style="width:${w}%;background:${s.color}"></div>`;
+    }).join('');
+    $legend.innerHTML = segs.filter(s => s.tok > 0).map(s =>
+      `<span class="ctx-legend-item">
+         <span class="ctx-dot" style="background:${s.color}"></span>
+         ${s.name}&nbsp;<span class="ctx-val">${fmtT(s.tok)}</span>
+       </span>`
+    ).join('');
+  }
+
+  return {
+    reset(agent) {
+      st.agent = agent || 'supervisor';
+      st.toolChars  = 0;
+      st.outputChars = 0;
+      render();
+    },
+    addToolResult(toolCount) {
+      st.toolChars += (toolCount || 1) * 700; // rough: ~700 chars/tool result
+      render();
+    },
+    addOutput(text) {
+      st.outputChars += (text || '').length;
+      render();
+    },
+    init() { render(); },
+  };
+})();
+
+ctxBar.init();
+
+// ── Chat ──────────────────────────────────────────────────────────────────────
+document.getElementById("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const msg = $input.value.trim();
+  if (!msg) return;
+  $input.value = "";
+  await sendMessage(msg);
+});
+
+async function sendMessage(message) {
+  setInputDisabled(true);
+  $empty && $empty.remove();
+  addUserBubble(message);
+  showFlow("Supervisor đang phân tích...");
+
+  const turns       = [];
+  let curBubble     = null;
+  let curAgent      = null;
+  let curCitations  = 0;
+  let curAgentStart = null;
+  let curTtft       = null;
+  let curReasoning  = '';
+
+  const NODE_LABEL = {
+    supervisor_reply: "🧠 Supervisor đang trả lời...",
+    json_agent:       "📦 JSON Agent đang tra cứu...",
+    web_search:       "🌐 Web Search đang tìm kiếm...",
+  };
+  const NODE_AGENT = { supervisor_reply: "supervisor", json_agent: "json_agent", web_search: "web_search" };
+
+  function commitCurrent() {
+    if (!curBubble) return;
+    finishBubble(curBubble, curAgent, curCitations, curTtft, curReasoning);
+    const texts = [...curBubble.querySelectorAll(".content-text")]
+      .map(b => b._raw || b.textContent).filter(Boolean).join("\n\n");
+    if (curAgent) turns.push({ agent: curAgent, content: texts });
+    curBubble = null; curAgent = null; curCitations = 0; curAgentStart = null; curTtft = null; curReasoning = '';
+  }
+
+  function markFirstToken() {
+    if (curAgentStart != null && curTtft == null)
+      curTtft = ((Date.now() - curAgentStart) / 1000).toFixed(1);
+  }
+
+  function ensureBubble(label) {
+    if (!curBubble) curBubble = createAiBubble(label || "Đang xử lý...");
+  }
+
+  try {
+    const resp = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, session_id: sessionId, history }),
+    });
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let sseBuf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseBuf += decoder.decode(value, { stream: true });
+      const delim = sseBuf.lastIndexOf("\n\n");
+      if (delim === -1) continue;
+      const chunk = sseBuf.slice(0, delim + 2);
+      sseBuf = sseBuf.slice(delim + 2);
+
+      for (const { type, data } of parseSse(chunk)) {
+        switch (type) {
+
+          case "node_start": {
+            const node = data.node;
+            if (node in NODE_AGENT) {
+              commitCurrent();
+              curAgent = NODE_AGENT[node]; curAgentStart = Date.now();
+              ctxBar.reset(curAgent);
+              ensureBubble(NODE_LABEL[node]);
+            } else if (node === "supervisor") {
+              showFlow("🧠 Supervisor đang phân tích...");
+            }
+            break;
+          }
+
+          case "routing": {
+            curReasoning = data.reasoning || '';
+            const hint = curReasoning.length > 72 ? curReasoning.slice(0, 72) + '…' : curReasoning;
+            showFlow(`🧠 → ${data.decision}${hint ? ` · ${hint}` : ''}`);
+            break;
+          }
+
+          case "tool_call":
+            ensureBubble();
+            setInfobar(curBubble, `🔧 ${data.name}()...`);
+            addToolChip(curBubble, data.name);
+            break;
+
+          case "tool_retry":
+            if (curBubble) setInfobar(curBubble, `🔄 ${data.info}`);
+            break;
+
+          case "tools_done":
+            if (curBubble) setInfobar(curBubble, "📦 Đang tổng hợp...");
+            ctxBar.addToolResult((data.tools || []).length);
+            break;
+
+          case "citations":
+            curCitations = data.count || 0;
+            break;
+
+          case "token":
+            ensureBubble();
+            markFirstToken();
+            ctxBar.addOutput(data.text);
+            appendToken(curBubble, data.text);
+            break;
+
+          case "token_batch":
+            ensureBubble();
+            markFirstToken();
+            ctxBar.addOutput(data.text);
+            setBatchText(curBubble, data.text);
+            break;
+
+          case "done":
+            commitCurrent();
+            hideFlow();
+            ctxBar.reset('supervisor'); // reset to supervisor view after turn completes
+            break;
+
+          case "error": {
+            commitCurrent(); hideFlow();
+            const eb = createAiBubble("⚠️ Lỗi");
+            setBatchText(eb, `**Lỗi:** ${escHtml(data.message || "Unknown error")}`);
+            finishBubble(eb, null, 0, null);
+            break;
+          }
+        }
+      }
+    }
+
+    history.push({ role: "user", content: message });
+    for (const t of turns) history.push({ role: "model", content: t.content, name: t.agent });
+    ctxBar.reset('supervisor'); // history segment now includes this turn
+
+  } catch (err) {
+    hideFlow();
+    const eb = createAiBubble("⚠️ Kết nối lỗi");
+    setBatchText(eb, `**Kết nối lỗi:** ${err.message}`);
+    finishBubble(eb, null, 0, null);
+  } finally {
+    setInputDisabled(false);
+    $input.focus();
+  }
+}
+</script>
+</body>
+</html>
