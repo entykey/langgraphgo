@@ -27,11 +27,13 @@ import (
 	"github.com/smallnest/langgraphgo/graph"
 )
 
+// supervisorModel is set at startup by buildGraph based on SUPERVISOR_BACKEND env.
+var supervisorModel = "gemini-3.1-flash-lite"
+
 const (
-	supervisorModel = "gemini-3.1-flash-lite"
-	jsonAgentModel  = "deepseek-v4-flash"
-	searchModel     = "gemini-3.1-flash-lite"
-	listenAddr      = ":8080"
+	jsonAgentModel = "deepseek-v4-flash"
+	searchModel    = "gemini-3.1-flash-lite"
+	listenAddr     = ":8080"
 )
 
 // ── .env loading ──────────────────────────────────────────────────────────────
@@ -53,7 +55,12 @@ func loadDotEnvFile(path string) bool {
 			continue
 		}
 		k := strings.TrimSpace(kv[0])
-		v := strings.Trim(strings.TrimSpace(kv[1]), `"'`)
+		raw := kv[1]
+		// strip inline comment (unquoted # and everything after)
+		if i := strings.Index(raw, " #"); i >= 0 {
+			raw = raw[:i]
+		}
+		v := strings.Trim(strings.TrimSpace(raw), `"'`)
 		if os.Getenv(k) == "" {
 			os.Setenv(k, v) //nolint:errcheck
 		}
@@ -140,6 +147,7 @@ func main() {
 
 func configHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
 		"supervisor": supervisorModel,
 		"json_agent": jsonAgentModel,

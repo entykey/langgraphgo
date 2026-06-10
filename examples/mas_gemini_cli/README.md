@@ -47,7 +47,8 @@ self_reply      → END          (prevents loop on direct answers)
 ## Example Output
 
 ```bash
-PS D:\tuan_dev\go_projects\langgraphgo\examples> go run ./mas_gemini_cli/
+PS D:\tuan_dev\go_projects\langgraphgo\examples> go run ./mas_gemini_cli/  
+>> 
 
 ╔════════════════════════════════════════════════════════════╗
 ║  🤖  MAS-LangGraph — Multi-Agent System CLI                ║
@@ -66,31 +67,29 @@ PS D:\tuan_dev\go_projects\langgraphgo\examples> go run ./mas_gemini_cli/
 
 ╔═══ STEP 1 ═══════════════════════════════════════════╗
   ┌─ [SUPERVISOR routing]
-  │  → "writing_expert" | Câu hỏi triết lý, cảm xúc — cần writing expert.
-  └─ done: 1.15s
+  │  → "self" | Câu hỏi mang tính triết lý và chiêm nghiệm về ý nghĩa cuộc sống, không yêu cầu kỹ thuật hay tra cứu, cần một câu trả lời mang tính đồng cảm và khai mở tư duy từ phía AI.
+  └─ done: 1.14s
 ╚═══════════════════════════════════════════════════════╝
 
-✍️  [writing_expert]
+🤖 [Supervisor]
 
-...response...
-  done: 5.29s
+Nếu cả đời không rực rỡ, thì cũng chẳng sao cả.
 
-╔═══ STEP 2 ═══════════════════════════════════════════╗
-  ┌─ [SUPERVISOR routing]
-  │  → "FINISH" | Response is complete.
-  ✅ FINISH
-  └─ done: 1.05s
-╚═══════════════════════════════════════════════════════╝
+Chúng ta thường bị áp lực phải trở nên "phi thường", nhưng thực tế, sự bình yên và an ổn mới là điều khó đạt được nhất. Một cuộc đời bình thường, sống trọn vẹn từng ngày, được làm điều mình thích và yêu thương những người xung quanh, đó đã là một thành tựu lớn rồi.
 
-┌───────────────────────────────────────────────────────┐
-│  📊 TIMING SUMMARY                                    │
-├──────┬──────────────────────────┬─────────────────────┤
-│ Step │ Agent                    │ Elapsed             │
-├──────┼──────────────────────────┼─────────────────────┤
-│   1  │ supervisor→route         │            1.15s     │
-│   1  │ writing_expert           │            5.29s     │
-│   2  │ supervisor→route         │            1.05s     │
-├──────┴──────────────────────────┴─────────────────────┤
-│  TOTAL                                        7.49s     │
-└───────────────────────────────────────────────────────┘
+Rực rỡ hay không là do mình tự định nghĩa. Nếu bạn thấy vui với một tách cà phê ngon, một giấc ngủ ngon, thì đó đã là sự rực rỡ của riêng bạn rồi. Đừng sống để trở thành "ngôi sao" trong mắt người khác, hãy sống để thấy nhẹ lòng với chính mình là đủ.
+  done: 1.12s  |  TTFT: 588ms  |  gen: 0.53s  |  156 tok  |  293.0 tok/s
+
+┌──────────────────────────────────────────────────────────────────────┐
+│  TIMING SUMMARY — Gemini 3.1 Flash Lite                              │
+├──────┬────────────────────────┬─────────┬─────────┬───────┬──────────┤
+│ Step │ Agent                  │ Elapsed │ TTFT    │ Tok   │ Tok/s    │
+├──────┬────────────────────────┬─────────┬─────────┬───────┬──────────┤
+│    1 │ supervisor→route       │   1.14s │       — │     — │        — │
+│    1 │ supervisor(self)       │   1.12s │   588ms │   156 │    293.0 │
+├──────┴────────────────────────┴─────────┴─────────┴───────┴──────────┤
+│  TOTAL 2.26s   · 156 tok  · avg 293.0 tok/s                          │
+└──────────────────────────────────────────────────────────────────────┘
+
+👤 Bạn: 
 ```

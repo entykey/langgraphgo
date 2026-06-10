@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+// SupervisorBackend is implemented by both GeminiClient and DSClient.
+// Swap via SUPERVISOR_BACKEND env var ("gemini" | "deepseek", default: "deepseek").
+type SupervisorBackend interface {
+	RouteJSON(ctx context.Context, systemPrompt, userPrompt string) (string, error)
+	StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, error)
+}
+
 const supervisorRoutingPrompt = `You are a routing supervisor. Classify the user's latest request into exactly one option:
 
   json_agent  — any query about JSONPlaceholder data: users, posts, todos, comments
@@ -15,7 +22,7 @@ const supervisorRoutingPrompt = `You are a routing supervisor. Classify the user
   self        — greeting, small talk, or conversational question with NO data involved
 
 RULE: When in doubt between json_agent and self, always choose json_agent.
-Reply ONLY JSON: {"reasoning":"...","next":"json_agent"|"web_search"|"self"}`
+Reply ONLY JSON with next first: {"next":"json_agent"|"web_search"|"self","reasoning":"one short sentence"}`
 
 const supervisorChatPrompt = `Bạn là trợ lý thân thiện. Trả lời ngắn gọn, tự nhiên bằng tiếng Việt.
 Nhớ lịch sử hội thoại. Không bịa dữ liệu — nếu cần dữ liệu hãy nói cần gọi tool.`
@@ -26,8 +33,8 @@ type routingDecision struct {
 }
 
 // supervisorNode routes the request or self-replies.
-// It emits: node_start, routing (if routing), token/done (if self-reply).
-func supervisorNode(gemini *GeminiClient) func(context.Context, AgentState) (AgentState, error) {
+// It emits: node_start, routing (if routing), token (if self-reply).
+func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState) (AgentState, error) {
 	return func(ctx context.Context, state AgentState) (AgentState, error) {
 		state.Step++
 		emit(state.EventCh, "node_start", map[string]string{"node": "supervisor"})
@@ -60,9 +67,8 @@ func supervisorNode(gemini *GeminiClient) func(context.Context, AgentState) (Age
 		userPrompt := fmt.Sprintf("User request: %s\n\nHistory:\n%s\n\nDecide:", lastUser, strings.Join(lines, "\n"))
 
 		t0 := time.Now()
-		raw, err := gemini.RouteJSON(ctx, supervisorRoutingPrompt, userPrompt)
+		raw, err := backend.RouteJSON(ctx, supervisorRoutingPrompt, userPrompt)
 		if err != nil {
-			// fallback to self on routing error
 			fmt.Printf("[supervisor] routing error: %v — fallback to self\n", err)
 			state.Next = "self"
 			emit(state.EventCh, "routing", map[string]string{"decision": "self", "reasoning": "routing error"})
@@ -87,25 +93,17 @@ func supervisorNode(gemini *GeminiClient) func(context.Context, AgentState) (Age
 			return state, nil
 		}
 
-		// Self-reply: stream tokens
+		// Self-reply: stream tokens via the configured backend
 		emit(state.EventCh, "node_start", map[string]string{"node": "supervisor_reply"})
-		tokCh := make(chan string, 256)
-		errc := make(chan error, 1)
-		go func() {
-			errc <- gemini.StreamChat(ctx, supervisorChatPrompt, state.Messages, tokCh)
-			close(tokCh)
-		}()
 
-		var sb strings.Builder
-		for tok := range tokCh {
-			sb.WriteString(tok)
+		text, err := backend.StreamReply(ctx, supervisorChatPrompt, state.Messages, func(tok string) {
 			emit(state.EventCh, "token", map[string]string{"text": tok})
-		}
-		if err := <-errc; err != nil {
+		})
+		if err != nil {
 			return state, fmt.Errorf("supervisor self-reply: %w", err)
 		}
 
-		state.Messages = append(state.Messages, Message{Role: "model", Content: sb.String(), Name: "supervisor"})
+		state.Messages = append(state.Messages, Message{Role: "model", Content: text, Name: "supervisor"})
 		state.Next = "FINISH"
 		return state, nil
 	}

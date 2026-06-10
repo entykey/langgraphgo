@@ -56,6 +56,7 @@ type dsReq struct {
 	ToolChoice     any               `json:"tool_choice,omitempty"` // "required" | "auto" | nil
 	ResponseFormat map[string]string `json:"response_format,omitempty"`
 	Temperature    float64           `json:"temperature"`
+	MaxTokens      int               `json:"max_tokens,omitempty"`
 	Thinking       dsThinking        `json:"thinking"`
 	Stream         bool              `json:"stream,omitempty"`
 }
@@ -147,6 +148,7 @@ func (c *DSClient) RouteJSON(ctx context.Context, systemPrompt, userPrompt strin
 		ResponseFormat: map[string]string{"type": "json_object"},
 		Thinking:       noThinkDS(),
 		Temperature:    0,
+		MaxTokens:      160,
 	})
 	if err != nil {
 		return "", err
@@ -274,6 +276,30 @@ func (c *DSClient) StreamChatWithTools(
 		msg.Content = &s
 	}
 	return msg, nil
+}
+
+// StreamReply implements SupervisorBackend for DSClient.
+func (c *DSClient) StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, error) {
+	dsMsgs := []dsChatMsg{{Role: "system", Content: strPtr(systemPrompt)}}
+	for _, m := range msgs {
+		role := m.Role
+		if role == "model" {
+			role = "assistant"
+		}
+		dsMsgs = append(dsMsgs, dsChatMsg{Role: role, Content: strPtr(m.Content)})
+	}
+	var sb strings.Builder
+	resp, err := c.StreamChatWithTools(ctx, dsMsgs, nil, nil, func(tok string) {
+		sb.WriteString(tok)
+		onToken(tok)
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp.Content != nil && sb.Len() == 0 {
+		return *resp.Content, nil
+	}
+	return sb.String(), nil
 }
 
 // buildAPITools converts ToolDef slice to the dsAPITool slice expected by the API.

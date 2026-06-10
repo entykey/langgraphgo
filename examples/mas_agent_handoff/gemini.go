@@ -188,6 +188,22 @@ func (c *GeminiClient) StreamChat(ctx context.Context, systemPrompt string, msgs
 	return sc.Err()
 }
 
+// StreamReply implements SupervisorBackend for GeminiClient.
+func (c *GeminiClient) StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, error) {
+	tokCh := make(chan string, 256)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- c.StreamChat(ctx, systemPrompt, msgs, tokCh)
+		close(tokCh)
+	}()
+	var sb strings.Builder
+	for tok := range tokCh {
+		sb.WriteString(tok)
+		onToken(tok)
+	}
+	return sb.String(), <-errc
+}
+
 // WebSearch calls Gemini with Google Search grounding (non-streaming, to preserve citations).
 type Citation struct {
 	Title string
