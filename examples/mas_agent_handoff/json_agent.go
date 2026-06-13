@@ -116,7 +116,7 @@ func jsonAgentNode(ds *DSClient) func(context.Context, AgentState) (AgentState, 
 					result = callWithRetry(def, args, state.EventCh)
 					globalLF.SpanEnd(toolSpanID, state.TraceID, map[string]any{"result": truncate(result, 300)})
 				}
-				fmt.Printf("[json_agent] tool result: %s...\n", truncate(result, 80))
+				fmt.Printf("[json_agent] tool result: %s...\n", truncateRune(result, 80))
 
 				msgs = append(msgs, dsChatMsg{
 					Role:       "tool",
@@ -180,6 +180,18 @@ func contains(s []string, v string) bool {
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	return s[:n]
+}
+
+// truncateRune truncates at a rune boundary to avoid splitting multi-byte UTF-8 characters.
+func truncateRune(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	// Walk back from byte n until we're at a rune boundary.
+	for n > 0 && (s[n]&0xC0) == 0x80 {
+		n--
 	}
 	return s[:n]
 }
