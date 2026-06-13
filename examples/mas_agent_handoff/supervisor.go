@@ -11,7 +11,8 @@ import (
 // SupervisorBackend is implemented by both GeminiClient and DSClient.
 // Swap via SUPERVISOR_BACKEND env var ("gemini" | "deepseek", default: "deepseek").
 type SupervisorBackend interface {
-	RouteJSON(ctx context.Context, systemPrompt, userPrompt string) (string, error)
+	// RouteJSON returns the raw JSON routing decision and prompt/completion token counts.
+	RouteJSON(ctx context.Context, systemPrompt, userPrompt string) (raw string, promptTok, completionTok int, err error)
 	StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, error)
 }
 
@@ -69,10 +70,18 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 		spanID := lfUUID()
 		globalLF.SpanStart(spanID, state.TraceID, "", "supervisor", map[string]any{"query": lastUser})
 
+		routeGenID := lfUUID()
+		globalLF.GenerationStart(routeGenID, state.TraceID, spanID, "supervisor-routing", supervisorModel,
+			[]map[string]any{
+				{"role": "system", "content": supervisorRoutingPrompt},
+				{"role": "user", "content": userPrompt},
+			})
+
 		t0 := time.Now()
-		raw, err := backend.RouteJSON(ctx, supervisorRoutingPrompt, userPrompt)
+		raw, promptTok, completionTok, err := backend.RouteJSON(ctx, supervisorRoutingPrompt, userPrompt)
 		if err != nil {
 			fmt.Printf("[supervisor] routing error: %v — fallback to self\n", err)
+			globalLF.GenerationEnd(routeGenID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0)
 			globalLF.SpanEnd(spanID, state.TraceID, map[string]any{"route": "self", "error": err.Error()})
 			state.Next = "self"
 			emit(state.EventCh, "routing", map[string]string{"decision": "self", "reasoning": "routing error"})
@@ -80,6 +89,9 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 		}
 		elapsed := time.Since(t0)
 		fmt.Printf("[supervisor] routing in %.2fs: %s\n", elapsed.Seconds(), raw)
+
+		globalLF.GenerationEnd(routeGenID, state.TraceID, map[string]any{"routing_json": raw},
+			promptTok, completionTok)
 
 		var dec routingDecision
 		if json.Unmarshal([]byte(raw), &dec) != nil {
@@ -108,17 +120,18 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 		emit(state.EventCh, "node_start", map[string]string{"node": "supervisor_reply"})
 
 		replyID := lfUUID()
-		globalLF.GenerationStart(replyID, state.TraceID, spanID, "supervisor-reply", supervisorModel,
-			map[string]any{"messages_count": len(state.Messages)})
+		replyInput := append([]map[string]any{{"role": "system", "content": supervisorChatPrompt}},
+			lfMsgs(state.Messages, 8)...)
+		globalLF.GenerationStart(replyID, state.TraceID, spanID, "supervisor-reply", supervisorModel, replyInput)
 
 		text, err := backend.StreamReply(ctx, supervisorChatPrompt, state.Messages, func(tok string) {
 			emit(state.EventCh, "token", map[string]string{"text": tok})
 		})
 		if err != nil {
-			globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"error": err.Error()}, 0)
+			globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0)
 			return state, fmt.Errorf("supervisor self-reply: %w", err)
 		}
-		globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"text": truncate(text, 300)}, 0)
+		globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"text": truncate(text, 300)}, 0, 0)
 
 		state.Messages = append(state.Messages, Message{Role: "model", Content: text, Name: "supervisor"})
 		state.Next = "FINISH"

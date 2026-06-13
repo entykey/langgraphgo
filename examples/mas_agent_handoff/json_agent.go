@@ -62,13 +62,25 @@ func jsonAgentNode(ds *DSClient) func(context.Context, AgentState) (AgentState, 
 			if round == 0 {
 				toolChoice = "required"
 			}
-			resp, err := ds.StreamChatWithTools(ctx, msgs, apiTools, toolChoice, func(tok string) {
+
+			genID := lfUUID()
+			globalLF.GenerationStart(genID, state.TraceID, spanID,
+				fmt.Sprintf("json-agent-round-%d", round+1), dsModel,
+				lfDSMsgs(msgs, 10))
+
+			resp, promptTok, completionTok, err := ds.StreamChatWithTools(ctx, msgs, apiTools, toolChoice, func(tok string) {
 				emit(state.EventCh, "token", map[string]string{"text": tok})
 				didStream = true
 			})
 			if err != nil {
+				globalLF.GenerationEnd(genID, state.TraceID, map[string]any{"error": err.Error()}, promptTok, completionTok)
 				return state, fmt.Errorf("json_agent DeepSeek: %w", err)
 			}
+			roundOut := map[string]any{"tool_calls": len(resp.ToolCalls)}
+			if resp.Content != nil {
+				roundOut["content_preview"] = truncate(*resp.Content, 200)
+			}
+			globalLF.GenerationEnd(genID, state.TraceID, roundOut, promptTok, completionTok)
 			fmt.Printf("[json_agent] round %d done in %.2fs, tool_calls=%d\n",
 				round+1, time.Since(t0).Seconds(), len(resp.ToolCalls))
 

@@ -48,6 +48,7 @@ type gCandidate struct {
 }
 
 type gUsageMeta struct {
+	PromptTokenCount     int `json:"promptTokenCount"`
 	CandidatesTokenCount int `json:"candidatesTokenCount"`
 }
 
@@ -118,24 +119,30 @@ func (c *GeminiClient) callAPI(ctx context.Context, req gRequest) (*gResponse, e
 }
 
 // RouteJSON calls Gemini with JSON response mode for supervisor routing.
-func (c *GeminiClient) RouteJSON(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+// Returns raw JSON string plus prompt/completion token counts for Langfuse.
+func (c *GeminiClient) RouteJSON(ctx context.Context, systemPrompt, userPrompt string) (string, int, int, error) {
 	resp, err := c.callAPI(ctx, gRequest{
 		Contents:          []gContent{{Role: "user", Parts: []gPart{{Text: userPrompt}}}},
 		SystemInstruction: c.sys(systemPrompt),
 		GenerationConfig:  map[string]any{"responseMimeType": "application/json"},
 	})
 	if err != nil {
-		return "", err
+		return "", 0, 0, err
 	}
 	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		return "", fmt.Errorf("empty Gemini response")
+		return "", 0, 0, fmt.Errorf("empty Gemini response")
 	}
 	raw := strings.TrimSpace(resp.Candidates[0].Content.Parts[0].Text)
 	for _, fence := range []string{"```json", "```"} {
 		raw = strings.TrimPrefix(raw, fence)
 		raw = strings.TrimSuffix(raw, fence)
 	}
-	return strings.TrimSpace(raw), nil
+	promptTok, completionTok := 0, 0
+	if resp.UsageMetadata != nil {
+		promptTok = resp.UsageMetadata.PromptTokenCount
+		completionTok = resp.UsageMetadata.CandidatesTokenCount
+	}
+	return strings.TrimSpace(raw), promptTok, completionTok, nil
 }
 
 // StreamChat streams a chat response, forwarding each token to the provided channel.
@@ -204,23 +211,24 @@ func (c *GeminiClient) StreamReply(ctx context.Context, systemPrompt string, msg
 	return sb.String(), <-errc
 }
 
+const webSearchSystemPrompt = "You are a Web Search Expert. Use Google Search to find the latest information. " +
+	"Provide a comprehensive answer in Vietnamese with source citations."
+
 // WebSearch calls Gemini with Google Search grounding (non-streaming, to preserve citations).
+// Returns text, citations, promptTokens, completionTokens, error.
 type Citation struct {
 	Title string
 	URL   string
 }
 
-func (c *GeminiClient) WebSearch(ctx context.Context, msgs []Message) (string, []Citation, error) {
+func (c *GeminiClient) WebSearch(ctx context.Context, msgs []Message) (string, []Citation, int, int, error) {
 	resp, err := c.callAPI(ctx, gRequest{
-		Contents: c.buildContents(msgs),
-		SystemInstruction: c.sys(
-			"You are a Web Search Expert. Use Google Search to find the latest information. " +
-				"Provide a comprehensive answer in Vietnamese with source citations.",
-		),
-		Tools: []map[string]any{{"googleSearch": map[string]any{}}},
+		Contents:          c.buildContents(msgs),
+		SystemInstruction: c.sys(webSearchSystemPrompt),
+		Tools:             []map[string]any{{"googleSearch": map[string]any{}}},
 	})
 	if err != nil {
-		return "", nil, err
+		return "", nil, 0, 0, err
 	}
 	text := ""
 	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
@@ -236,5 +244,10 @@ func (c *GeminiClient) WebSearch(ctx context.Context, msgs []Message) (string, [
 			}
 		}
 	}
-	return text, citations, nil
+	promptTok, completionTok := 0, 0
+	if resp.UsageMetadata != nil {
+		promptTok = resp.UsageMetadata.PromptTokenCount
+		completionTok = resp.UsageMetadata.CandidatesTokenCount
+	}
+	return text, citations, promptTok, completionTok, nil
 }

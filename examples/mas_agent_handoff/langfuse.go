@@ -150,7 +150,7 @@ func (c *LFClient) TraceUpdate(id, answer string) {
 
 // ── Span ──────────────────────────────────────────────────────────────────────
 
-func (c *LFClient) SpanStart(id, traceID, parentID, name string, input map[string]any) time.Time {
+func (c *LFClient) SpanStart(id, traceID, parentID, name string, input any) time.Time {
 	t := time.Now().UTC()
 	body := map[string]any{
 		"id":        id,
@@ -177,7 +177,9 @@ func (c *LFClient) SpanEnd(id, traceID string, output map[string]any) {
 
 // ── Generation (LLM call) ────────────────────────────────────────────────────
 
-func (c *LFClient) GenerationStart(id, traceID, parentID, name, model string, input map[string]any) time.Time {
+// GenerationStart records an LLM call span. input should be a []map[string]any
+// of chat messages (Langfuse renders these as "Chat messages") or any JSON value.
+func (c *LFClient) GenerationStart(id, traceID, parentID, name, model string, input any) time.Time {
 	t := time.Now().UTC()
 	body := map[string]any{
 		"id":        id,
@@ -194,20 +196,65 @@ func (c *LFClient) GenerationStart(id, traceID, parentID, name, model string, in
 	return t
 }
 
-func (c *LFClient) GenerationEnd(id, traceID string, output map[string]any, outTokens int) {
+// GenerationEnd closes a generation span. Pass inputTokens=0/outTokens=0 to omit usage.
+func (c *LFClient) GenerationEnd(id, traceID string, output map[string]any, inputTokens, outTokens int) {
 	body := map[string]any{
 		"id":      id,
 		"traceId": traceID,
 		"endTime": time.Now().UTC().Format(time.RFC3339Nano),
 		"output":  output,
 	}
-	if outTokens > 0 {
-		body["usage"] = map[string]any{"output": outTokens}
+	if inputTokens > 0 || outTokens > 0 {
+		body["usage"] = map[string]any{"input": inputTokens, "output": outTokens}
 	}
 	c.enqueue("generation-update", body)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// lfMsgs formats a Message slice as Langfuse chat-message array (role+content).
+// max=0 means include all; positive max takes the last N messages.
+func lfMsgs(msgs []Message, max int) []map[string]any {
+	start := 0
+	if max > 0 && len(msgs) > max {
+		start = len(msgs) - max
+	}
+	out := make([]map[string]any, 0, len(msgs)-start)
+	for _, m := range msgs[start:] {
+		role := m.Role
+		if role == "model" {
+			role = "assistant"
+		}
+		content := m.Content
+		if len(content) > 500 {
+			content = content[:500] + "…"
+		}
+		out = append(out, map[string]any{"role": role, "content": content})
+	}
+	return out
+}
+
+// lfDSMsgs formats a dsChatMsg slice as Langfuse chat-message array.
+func lfDSMsgs(msgs []dsChatMsg, max int) []map[string]any {
+	start := 0
+	if max > 0 && len(msgs) > max {
+		start = len(msgs) - max
+	}
+	out := make([]map[string]any, 0, len(msgs)-start)
+	for _, m := range msgs[start:] {
+		content := ""
+		if m.Content != nil {
+			content = *m.Content
+		} else if len(m.ToolCalls) > 0 {
+			content = fmt.Sprintf("[%d tool call(s)]", len(m.ToolCalls))
+		}
+		if len(content) > 500 {
+			content = content[:500] + "…"
+		}
+		out = append(out, map[string]any{"role": m.Role, "content": content})
+	}
+	return out
+}
 
 func lfUUID() string {
 	b := make([]byte, 16)

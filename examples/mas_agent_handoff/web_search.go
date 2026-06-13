@@ -21,17 +21,20 @@ func webSearchNode(gemini *GeminiClient) func(context.Context, AgentState) (Agen
 		}
 		genID := lfUUID()
 		globalLF.GenerationStart(genID, state.TraceID, "", "web_search", gemModel,
-			map[string]any{"query": lastUser})
+			[]map[string]any{
+				{"role": "system", "content": webSearchSystemPrompt},
+				{"role": "user", "content": lastUser},
+			})
 
-		text, citations, err := gemini.WebSearch(ctx, state.Messages)
+		text, citations, promptTok, completionTok, err := gemini.WebSearch(ctx, state.Messages)
 		if err != nil {
-			globalLF.GenerationEnd(genID, state.TraceID, map[string]any{"error": err.Error()}, 0)
+			globalLF.GenerationEnd(genID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0)
 			return state, fmt.Errorf("web_search: %w", err)
 		}
 		globalLF.GenerationEnd(genID, state.TraceID, map[string]any{
 			"text_preview": truncate(text, 300),
 			"citations":    len(citations),
-		}, 0)
+		}, promptTok, completionTok)
 
 		if len(citations) > 0 {
 			emit(state.EventCh, "citations", map[string]any{"count": len(citations)})

@@ -49,6 +49,10 @@ type dsThinking struct {
 	Type string `json:"type"`
 }
 
+type dsStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 type dsReq struct {
 	Model          string            `json:"model"`
 	Messages       []dsChatMsg       `json:"messages"`
@@ -59,6 +63,7 @@ type dsReq struct {
 	MaxTokens      int               `json:"max_tokens,omitempty"`
 	Thinking       dsThinking        `json:"thinking"`
 	Stream         bool              `json:"stream,omitempty"`
+	StreamOptions  *dsStreamOptions  `json:"stream_options,omitempty"`
 }
 
 // ── streaming delta types ─────────────────────────────────────────────────────
@@ -82,6 +87,10 @@ type dsStreamChunk struct {
 	Choices []struct {
 		Delta dsStreamDelta `json:"delta"`
 	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage,omitempty"`
 }
 
 type dsResp struct {
@@ -89,6 +98,7 @@ type dsResp struct {
 		Message dsChatMsg `json:"message"`
 	} `json:"choices"`
 	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 	} `json:"usage"`
 	Error *struct{ Message string } `json:"error,omitempty"`
@@ -137,8 +147,8 @@ func (c *DSClient) post(ctx context.Context, req dsReq) (*dsResp, error) {
 }
 
 // RouteJSON calls DeepSeek with JSON mode and returns a routing decision.
-// Used by supervisor to decide which agent handles the request.
-func (c *DSClient) RouteJSON(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
+// Returns raw JSON string plus prompt/completion token counts for Langfuse.
+func (c *DSClient) RouteJSON(ctx context.Context, systemPrompt, userPrompt string) (string, int, int, error) {
 	resp, err := c.post(ctx, dsReq{
 		Model: dsModel,
 		Messages: []dsChatMsg{
@@ -151,12 +161,17 @@ func (c *DSClient) RouteJSON(ctx context.Context, systemPrompt, userPrompt strin
 		MaxTokens:      160,
 	})
 	if err != nil {
-		return "", err
+		return "", 0, 0, err
 	}
 	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content == nil {
-		return "", fmt.Errorf("empty response")
+		return "", 0, 0, fmt.Errorf("empty response")
 	}
-	return strings.TrimSpace(*resp.Choices[0].Message.Content), nil
+	promptTok, completionTok := 0, 0
+	if resp.Usage != nil {
+		promptTok = resp.Usage.PromptTokens
+		completionTok = resp.Usage.CompletionTokens
+	}
+	return strings.TrimSpace(*resp.Choices[0].Message.Content), promptTok, completionTok, nil
 }
 
 // ChatWithTools runs one turn of a ReAct tool-calling loop.
@@ -183,46 +198,49 @@ func (c *DSClient) ChatWithTools(ctx context.Context, messages []dsChatMsg, tool
 // toolChoice: "required" forces a tool call (use on round 0); nil lets the model decide.
 // onToken is called for each text token when the response is a final answer.
 // Tool-call responses are accumulated silently and returned in full.
+// Returns (message, promptTokens, completionTokens, error).
 func (c *DSClient) StreamChatWithTools(
 	ctx context.Context,
 	messages []dsChatMsg,
 	tools []dsAPITool,
 	toolChoice any,
 	onToken func(string),
-) (*dsChatMsg, error) {
+) (*dsChatMsg, int, int, error) {
 	b, err := json.Marshal(dsReq{
-		Model:       dsModel,
-		Messages:    messages,
-		Tools:       tools,
-		ToolChoice:  toolChoice,
-		Thinking:    noThinkDS(),
-		Temperature: 0.3,
-		Stream:      true,
+		Model:         dsModel,
+		Messages:      messages,
+		Tools:         tools,
+		ToolChoice:    toolChoice,
+		Thinking:      noThinkDS(),
+		Temperature:   0.3,
+		Stream:        true,
+		StreamOptions: &dsStreamOptions{IncludeUsage: true},
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	hr, err := http.NewRequestWithContext(ctx, "POST", dsAPI, bytes.NewReader(b))
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	hr.Header.Set("Authorization", "Bearer "+c.apiKey)
 
 	resp, err := http.DefaultClient.Do(hr)
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		data, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("DeepSeek stream %d: %s", resp.StatusCode, string(data))
+		return nil, 0, 0, fmt.Errorf("DeepSeek stream %d: %s", resp.StatusCode, string(data))
 	}
 
 	// deepseek-v4-flash streams preamble text BEFORE tool_call deltas in the same
 	// response.  Accumulate both throughout; decide at the end: tool_calls win.
 	var contentBuf strings.Builder
 	var toolCalls []dsToolCall
+	var promptTok, completionTok int
 
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
@@ -236,7 +254,15 @@ func (c *DSClient) StreamChatWithTools(
 			break
 		}
 		var chunk dsStreamChunk
-		if json.Unmarshal([]byte(payload), &chunk) != nil || len(chunk.Choices) == 0 {
+		if json.Unmarshal([]byte(payload), &chunk) != nil {
+			continue
+		}
+		// Usage arrives in a final chunk with empty choices (stream_options.include_usage).
+		if chunk.Usage != nil {
+			promptTok = chunk.Usage.PromptTokens
+			completionTok = chunk.Usage.CompletionTokens
+		}
+		if len(chunk.Choices) == 0 {
 			continue
 		}
 		delta := chunk.Choices[0].Delta
@@ -264,7 +290,7 @@ func (c *DSClient) StreamChatWithTools(
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("stream scan: %w", err)
+		return nil, 0, 0, fmt.Errorf("stream scan: %w", err)
 	}
 
 	// Tool calls take priority: return them even when preamble text was also streamed.
@@ -275,7 +301,7 @@ func (c *DSClient) StreamChatWithTools(
 		s := contentBuf.String()
 		msg.Content = &s
 	}
-	return msg, nil
+	return msg, promptTok, completionTok, nil
 }
 
 // StreamReply implements SupervisorBackend for DSClient.
@@ -289,7 +315,7 @@ func (c *DSClient) StreamReply(ctx context.Context, systemPrompt string, msgs []
 		dsMsgs = append(dsMsgs, dsChatMsg{Role: role, Content: strPtr(m.Content)})
 	}
 	var sb strings.Builder
-	resp, err := c.StreamChatWithTools(ctx, dsMsgs, nil, nil, func(tok string) {
+	resp, _, _, err := c.StreamChatWithTools(ctx, dsMsgs, nil, nil, func(tok string) {
 		sb.WriteString(tok)
 		onToken(tok)
 	})
