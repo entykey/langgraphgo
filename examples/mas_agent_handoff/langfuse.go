@@ -95,12 +95,15 @@ func (c *LFClient) sendBatch(batch []lfBatch) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", c.authHeader)
+	t0 := time.Now()
 	resp, err := http.DefaultClient.Do(req)
+	elapsed := time.Since(t0)
 	if err != nil {
-		fmt.Printf("[langfuse] send error: %v\n", err)
+		fmt.Printf("[langfuse] send error after %dms: %v\n", elapsed.Milliseconds(), err)
 		return
 	}
 	resp.Body.Close()
+	fmt.Printf("[langfuse] batch %d events → %d (%dms)\n", len(batch), resp.StatusCode, elapsed.Milliseconds())
 }
 
 func (c *LFClient) enqueue(eventType string, body map[string]any) {
