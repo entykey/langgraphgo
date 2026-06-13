@@ -12,10 +12,26 @@ func webSearchNode(gemini *GeminiClient) func(context.Context, AgentState) (Agen
 		emit(state.EventCh, "node_start", map[string]string{"node": "web_search"})
 		fmt.Println("[web_search] starting")
 
+		lastUser := ""
+		for i := len(state.Messages) - 1; i >= 0; i-- {
+			if state.Messages[i].Role == "user" {
+				lastUser = state.Messages[i].Content
+				break
+			}
+		}
+		genID := lfUUID()
+		globalLF.GenerationStart(genID, state.TraceID, "", "web_search", gemModel,
+			map[string]any{"query": lastUser})
+
 		text, citations, err := gemini.WebSearch(ctx, state.Messages)
 		if err != nil {
+			globalLF.GenerationEnd(genID, state.TraceID, map[string]any{"error": err.Error()}, 0)
 			return state, fmt.Errorf("web_search: %w", err)
 		}
+		globalLF.GenerationEnd(genID, state.TraceID, map[string]any{
+			"text_preview": truncate(text, 300),
+			"citations":    len(citations),
+		}, 0)
 
 		if len(citations) > 0 {
 			emit(state.EventCh, "citations", map[string]any{"count": len(citations)})

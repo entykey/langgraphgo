@@ -121,6 +121,7 @@ type messageJSON struct {
 
 func main() {
 	loadDotEnv()
+	initLangfuse()
 
 	gemini := NewGeminiClient(mustEnv("GOOGLE_API_KEY"))
 	ds := NewDSClient(mustEnv("DEEPSEEK_API_KEY"))
@@ -139,6 +140,7 @@ func main() {
 	fmt.Printf("[mas_agent_handoff] listening on http://localhost%s\n", listenAddr)
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		fmt.Fprintln(os.Stderr, "server:", err)
+		globalLF.Shutdown()
 		os.Exit(1)
 	}
 }
@@ -175,6 +177,15 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 		}
 		msgs = append(msgs, Message{Role: "user", Content: req.Message})
 
+		// Langfuse trace for this turn
+		traceID := lfUUID()
+		sessionID := req.SessionID
+		if sessionID == "" {
+			sessionID = lfUUID()
+		}
+		tags := []string{"mas-agent-handoff", "go", supervisorModel}
+		globalLF.TraceCreate(traceID, sessionID, req.Message, tags)
+
 		// SSE response headers
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -186,9 +197,21 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 
 		go func() {
 			defer close(eventCh)
-			state := AgentState{Messages: msgs, EventCh: eventCh}
-			if _, err := g.Invoke(r.Context(), state); err != nil {
+			state := AgentState{
+				Messages:  msgs,
+				EventCh:   eventCh,
+				TraceID:   traceID,
+				SessionID: sessionID,
+			}
+			result, err := g.Invoke(r.Context(), state)
+			if err != nil {
 				eventCh <- SSEEvent{Type: "error", Data: map[string]string{"message": err.Error()}}
+				return
+			}
+			// Update trace output — non-blocking, fires after done SSE is already sent
+			if len(result.Messages) > 0 {
+				last := result.Messages[len(result.Messages)-1]
+				globalLF.TraceUpdate(traceID, last.Content)
 			}
 		}()
 

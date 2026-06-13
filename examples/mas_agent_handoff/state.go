@@ -15,10 +15,12 @@ type Message struct {
 // AgentState flows through the LangGraphGo graph.
 // EventCh is a per-request write-only channel; nodes emit SSE events through it.
 type AgentState struct {
-	Messages []Message
-	Next     string
-	EventCh  chan<- SSEEvent
-	Step     int
+	Messages  []Message
+	Next      string
+	EventCh   chan<- SSEEvent
+	Step      int
+	TraceID   string // Langfuse trace ID for this request turn
+	SessionID string // from HTTP request, groups turns into a session
 }
 
 // SSEEvent is one server-sent event emitted by a graph node.

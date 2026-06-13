@@ -31,6 +31,16 @@ func jsonAgentNode(ds *DSClient) func(context.Context, AgentState) (AgentState, 
 		emit(state.EventCh, "node_start", map[string]string{"node": "json_agent"})
 		fmt.Println("[json_agent] starting")
 
+		lastUser := ""
+		for i := len(state.Messages) - 1; i >= 0; i-- {
+			if state.Messages[i].Role == "user" {
+				lastUser = state.Messages[i].Content
+				break
+			}
+		}
+		spanID := lfUUID()
+		globalLF.SpanStart(spanID, state.TraceID, "", "json_agent", map[string]any{"query": lastUser})
+
 		msgs := []dsChatMsg{{Role: "system", Content: strPtr(jsonAgentSystemPrompt)}}
 		for _, m := range state.Messages {
 			role := m.Role
@@ -89,7 +99,10 @@ func jsonAgentNode(ds *DSClient) func(context.Context, AgentState) (AgentState, 
 					if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil {
 						args = map[string]any{}
 					}
+					toolSpanID := lfUUID()
+					globalLF.SpanStart(toolSpanID, state.TraceID, spanID, name, map[string]any{"args": tc.Function.Arguments})
 					result = callWithRetry(def, args, state.EventCh)
+					globalLF.SpanEnd(toolSpanID, state.TraceID, map[string]any{"result": truncate(result, 300)})
 				}
 				fmt.Printf("[json_agent] tool result: %s...\n", truncate(result, 80))
 
@@ -100,6 +113,11 @@ func jsonAgentNode(ds *DSClient) func(context.Context, AgentState) (AgentState, 
 				})
 			}
 		}
+
+		globalLF.SpanEnd(spanID, state.TraceID, map[string]any{
+			"answer":       truncate(fullResponse, 300),
+			"tools_called": toolsCalled,
+		})
 
 		if len(toolsCalled) > 0 {
 			emit(state.EventCh, "tools_done", map[string]any{"tools": toolsCalled})
