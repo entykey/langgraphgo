@@ -45,6 +45,16 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 			return state, nil
 		}
 
+		// Image present → skip LLM routing, send straight to vision_agent (Gemini VLM).
+		if state.ImageB64 != "" {
+			emit(state.EventCh, "routing", map[string]string{
+				"decision":  "vision_agent",
+				"reasoning": fmt.Sprintf("image detected (%s) → Gemini VLM", state.ImageMime),
+			})
+			state.Next = "vision_agent"
+			return state, nil
+		}
+
 		// Build routing prompt from conversation history
 		lastUser := ""
 		for i := len(state.Messages) - 1; i >= 0; i-- {

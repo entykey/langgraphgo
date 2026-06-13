@@ -21,6 +21,8 @@ type AgentState struct {
 	Step      int
 	TraceID   string // Langfuse trace ID for this request turn
 	SessionID string // from HTTP request, groups turns into a session
+	ImageB64  string // base64-encoded image for the current turn (empty = text-only)
+	ImageMime string // MIME type e.g. "image/jpeg" (empty when no image)
 }
 
 // SSEEvent is one server-sent event emitted by a graph node.

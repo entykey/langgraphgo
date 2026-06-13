@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -89,6 +90,28 @@ func (c *LFClient) sendBatch(batch []lfBatch) {
 	if err != nil {
 		return
 	}
+
+	// Collect event types for the summary log line.
+	types := make([]string, len(batch))
+	for i, ev := range batch {
+		types[i] = ev.Type
+	}
+	kb := float64(len(b)) / 1024
+
+	if os.Getenv("LANGFUSE_DEBUG") == "1" {
+		sanitized := make([]map[string]any, len(batch))
+		for i, ev := range batch {
+			sanitized[i] = map[string]any{
+				"id":        ev.ID,
+				"type":      ev.Type,
+				"timestamp": ev.Timestamp,
+				"body":      sanitizeAny(ev.Body),
+			}
+		}
+		pretty, _ := json.MarshalIndent(map[string]any{"batch": sanitized}, "", "  ")
+		fmt.Printf("[langfuse:debug] payload %.1fKB:\n%s\n", kb, pretty)
+	}
+
 	req, err := http.NewRequest("POST", c.host+"/api/public/ingestion", bytes.NewReader(b))
 	if err != nil {
 		return
@@ -103,7 +126,40 @@ func (c *LFClient) sendBatch(batch []lfBatch) {
 		return
 	}
 	resp.Body.Close()
-	fmt.Printf("[langfuse] batch %d events → %d (%dms)\n", len(batch), resp.StatusCode, elapsed.Milliseconds())
+	fmt.Printf("[langfuse] batch %d [%s] → %d (%.1fKB, %dms)\n",
+		len(batch), strings.Join(types, ","), resp.StatusCode, kb, elapsed.Milliseconds())
+}
+
+// sanitizeAny recursively replaces strings longer than 500 chars with a placeholder.
+// Prevents base64 image data from flooding debug logs or Langfuse payloads.
+func sanitizeAny(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[k] = sanitizeAny(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = sanitizeAny(val)
+		}
+		return out
+	case []map[string]any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = sanitizeAny(val)
+		}
+		return out
+	case string:
+		if len(x) > 500 {
+			return fmt.Sprintf("[%d chars]", len(x))
+		}
+		return x
+	default:
+		return x
+	}
 }
 
 func (c *LFClient) enqueue(eventType string, body map[string]any) {

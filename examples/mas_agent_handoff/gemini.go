@@ -20,7 +20,13 @@ const (
 // ── Gemini REST API types ─────────────────────────────────────────────────────
 
 type gPart struct {
-	Text string `json:"text"`
+	Text       string       `json:"text,omitempty"`
+	InlineData *gInlineData `json:"inlineData,omitempty"`
+}
+
+type gInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"` // base64
 }
 type gContent struct {
 	Role  string  `json:"role"`
@@ -209,6 +215,87 @@ func (c *GeminiClient) StreamReply(ctx context.Context, systemPrompt string, msg
 		onToken(tok)
 	}
 	return sb.String(), <-errc
+}
+
+// StreamChatWithImage streams a Gemini VLM response. The image is prepended to the
+// last user content part; history is carried as normal text-only messages.
+// Returns (fullText, promptTokens, completionTokens, error).
+func (c *GeminiClient) StreamChatWithImage(
+	ctx context.Context,
+	systemPrompt string,
+	msgs []Message,
+	imageB64, imageMime string,
+	onToken func(string),
+) (string, int, int, error) {
+	contents := c.buildContents(msgs)
+	// Prepend the image part to the last user turn.
+	for i := len(contents) - 1; i >= 0; i-- {
+		if contents[i].Role == "user" {
+			contents[i].Parts = append([]gPart{
+				{InlineData: &gInlineData{MimeType: imageMime, Data: imageB64}},
+			}, contents[i].Parts...)
+			break
+		}
+	}
+
+	req := gRequest{
+		Contents:          contents,
+		SystemInstruction: c.sys(systemPrompt),
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	url := gemBase + ":streamGenerateContent?alt=sse&key=" + c.apiKey
+	hr, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
+	if err != nil {
+		return "", 0, 0, err
+	}
+	hr.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		return "", 0, 0, fmt.Errorf("Gemini VLM stream %d: %s", resp.StatusCode, string(d))
+	}
+
+	var sb strings.Builder
+	var promptTok, completionTok int
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 4<<20), 4<<20) // 4 MB — VLM responses can be longer
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			break
+		}
+		var gr gResponse
+		if json.Unmarshal([]byte(payload), &gr) != nil {
+			continue
+		}
+		if gr.UsageMetadata != nil {
+			promptTok = gr.UsageMetadata.PromptTokenCount
+			completionTok = gr.UsageMetadata.CandidatesTokenCount
+		}
+		if len(gr.Candidates) > 0 && len(gr.Candidates[0].Content.Parts) > 0 {
+			if tok := gr.Candidates[0].Content.Parts[0].Text; tok != "" {
+				sb.WriteString(tok)
+				if onToken != nil {
+					onToken(tok)
+				}
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return "", 0, 0, fmt.Errorf("VLM stream scan: %w", err)
+	}
+	return sb.String(), promptTok, completionTok, nil
 }
 
 const webSearchSystemPrompt = "You are a Web Search Expert. Use Google Search to find the latest information. " +

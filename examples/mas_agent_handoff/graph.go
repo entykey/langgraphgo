@@ -25,13 +25,14 @@ func buildGraph(gemini *GeminiClient, ds *DSClient) (*graph.StateRunnable[AgentS
 	g.AddNode("supervisor", "route request to the correct agent", supervisorNode(supervisorBackend))
 	g.AddNode("json_agent", "JSONPlaceholder data agent (DeepSeek)", jsonAgentNode(ds))
 	g.AddNode("web_search", "Google Search grounding (Gemini)", webSearchNode(gemini))
+	g.AddNode("vision_agent", "Gemini VLM — image analysis", visionAgentNode(gemini))
 
 	g.SetEntryPoint("supervisor")
 
 	// Supervisor sets state.Next; this edge routes to the chosen node or ends the graph.
 	g.AddConditionalEdge("supervisor", func(_ context.Context, state AgentState) string {
 		switch state.Next {
-		case "json_agent", "web_search":
+		case "json_agent", "web_search", "vision_agent":
 			return state.Next
 		default:
 			return graph.END
@@ -40,6 +41,7 @@ func buildGraph(gemini *GeminiClient, ds *DSClient) (*graph.StateRunnable[AgentS
 
 	g.AddEdge("json_agent", graph.END)
 	g.AddEdge("web_search", graph.END)
+	g.AddEdge("vision_agent", graph.END)
 
 	return g.Compile()
 }

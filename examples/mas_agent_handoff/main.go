@@ -113,6 +113,8 @@ type chatRequest struct {
 	Message   string        `json:"message"`
 	SessionID string        `json:"session_id"`
 	History   []messageJSON `json:"history"`
+	ImageB64  string        `json:"image_b64,omitempty"`
+	ImageMime string        `json:"image_mime,omitempty"`
 }
 
 type messageJSON struct {
@@ -208,6 +210,8 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 				EventCh:   eventCh,
 				TraceID:   traceID,
 				SessionID: sessionID,
+				ImageB64:  req.ImageB64,
+				ImageMime: req.ImageMime,
 			}
 			result, err := g.Invoke(r.Context(), state)
 			if err != nil {
