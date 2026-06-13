@@ -113,6 +113,7 @@ type chatRequest struct {
 	Message   string        `json:"message"`
 	SessionID string        `json:"session_id"`
 	History   []messageJSON `json:"history"`
+	ImageID   string        `json:"image_id,omitempty"`
 	ImageB64  string        `json:"image_b64,omitempty"`
 	ImageMime string        `json:"image_mime,omitempty"`
 }
@@ -141,6 +142,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/config", corsMiddleware(configHandler))
+	mux.HandleFunc("/upload", corsMiddleware(uploadHandler))
+	mux.HandleFunc("/image/", corsMiddleware(imageHandler))
 	mux.HandleFunc("/chat", corsMiddleware(chatHandler(g)))
 	mux.Handle("/", staticHandler())
 
@@ -182,6 +185,19 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 			return
 		}
 
+		// Resolve image: prefer UUID from cache over inline base64.
+		// Uses lookupImage (non-consuming) so /image/{id} can still serve the file afterward.
+		imageB64, imageMime := req.ImageB64, req.ImageMime
+		if req.ImageID != "" {
+			if entry, ok := lookupImage(req.ImageID); ok {
+				imageB64 = entry.B64
+				imageMime = entry.Mime
+				fmt.Printf("[chat] resolved image_id=%s (%s)\n", req.ImageID, imageMime)
+			} else {
+				fmt.Printf("[chat] image_id=%s not found in cache (expired or server restarted)\n", req.ImageID)
+			}
+		}
+
 		// Build message history
 		msgs := make([]Message, 0, len(req.History)+1)
 		for _, m := range req.History {
@@ -214,8 +230,8 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 				EventCh:   eventCh,
 				TraceID:   traceID,
 				SessionID: sessionID,
-				ImageB64:  req.ImageB64,
-				ImageMime: req.ImageMime,
+				ImageB64:  imageB64,
+				ImageMime: imageMime,
 			}
 			result, err := g.Invoke(r.Context(), state)
 			if err != nil {

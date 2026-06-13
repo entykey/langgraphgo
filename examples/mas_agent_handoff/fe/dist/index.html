@@ -184,13 +184,42 @@
   .img-preview-bar {
     padding: 8px 20px 0; flex-shrink: 0; display: flex; align-items: center; gap: 10px;
   }
-  .img-preview-bar img { max-height: 72px; border-radius: 8px; border: 1px solid var(--border); }
-  .img-preview-bar .img-label { font-size: 11px; color: var(--muted); }
-  .img-preview-bar button {
-    background: none; border: 1px solid var(--border); color: var(--muted);
-    border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 12px;
+  .img-thumb-wrap { position: relative; cursor: zoom-in; flex-shrink: 0; }
+  .img-preview-bar img { max-height: 72px; border-radius: 8px; border: 1px solid var(--border); display: block; }
+  .img-thumb-overlay {
+    position: absolute; inset: 0; background: rgba(0,0,0,.55); border-radius: 8px;
+    display: flex; align-items: center; justify-content: center; pointer-events: none;
   }
-  .img-preview-bar button:hover { border-color: #ef4444; color: #ef4444; }
+  .img-preview-info { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 0; }
+  .img-label { font-size: 11px; color: var(--muted); }
+  .img-progress-track { height: 3px; background: var(--surface2); border-radius: 2px; overflow: hidden; width: 100%; max-width: 220px; }
+  .img-progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width .08s linear; width: 0%; }
+  .img-server-badge {
+    font-size: 10px; color: #34d399; font-family: var(--mono); cursor: zoom-in;
+    letter-spacing: -.2px; white-space: nowrap;
+  }
+  .img-server-badge:hover { text-decoration: underline; }
+  .img-preview-bar .remove-btn {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 12px; flex-shrink: 0;
+  }
+  .img-preview-bar .remove-btn:hover { border-color: #ef4444; color: #ef4444; }
+
+  /* Lightbox */
+  #lightbox {
+    position: fixed; inset: 0; background: rgba(0,0,0,.88); z-index: 9999;
+    display: none; align-items: center; justify-content: center; cursor: zoom-out;
+  }
+  #lightbox img {
+    max-width: 92vw; max-height: 92vh; border-radius: 8px; object-fit: contain;
+    box-shadow: 0 8px 40px rgba(0,0,0,.6); pointer-events: none;
+  }
+  #lightbox-close {
+    position: fixed; top: 16px; right: 20px; background: rgba(0,0,0,.45);
+    border: 1px solid rgba(255,255,255,.2); color: #fff; font-size: 16px; line-height: 1;
+    cursor: pointer; border-radius: 6px; padding: 4px 10px; z-index: 10000;
+  }
+  #lightbox-close:hover { background: rgba(255,255,255,.12); }
 
   /* Drag-over highlight */
   .layout.drag-over { outline: 2px dashed var(--accent); outline-offset: -4px; }
@@ -261,9 +290,27 @@
   </div>
 
   <div class="img-preview-bar" id="img-preview-bar" style="display:none">
-    <img id="img-preview-thumb" src="" alt="preview" />
-    <span class="img-label" id="img-preview-label"></span>
-    <button type="button" onclick="clearPendingImage()">✕ Xóa ảnh</button>
+    <div class="img-thumb-wrap" id="img-thumb-wrap" onclick="openLightbox()" title="Xem toàn màn hình">
+      <img id="img-preview-thumb" src="" alt="preview" />
+      <div class="img-thumb-overlay" id="img-thumb-overlay" style="display:none">
+        <div class="spinner"></div>
+      </div>
+    </div>
+    <div class="img-preview-info">
+      <span class="img-label" id="img-preview-label"></span>
+      <div class="img-progress-track" id="img-progress-track" style="display:none">
+        <div class="img-progress-fill" id="img-progress-fill"></div>
+      </div>
+      <span class="img-server-badge" id="img-server-badge" style="display:none"
+            onclick="openLightbox()">✓ available on server · click to preview</span>
+    </div>
+    <button class="remove-btn" type="button" onclick="clearPendingImage()">✕</button>
+  </div>
+
+  <!-- Lightbox overlay -->
+  <div id="lightbox" onclick="closeLightbox()">
+    <img id="lightbox-img" src="" alt="preview" />
+    <button id="lightbox-close" onclick="closeLightbox()">✕</button>
   </div>
 
   <form class="input-area" id="form" autocomplete="off">
@@ -435,13 +482,27 @@ function escHtml(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replac
 function setInputDisabled(v) { $input.disabled = v; $btn.disabled = v; }
 function fillInput(el) { $input.value = el.textContent; $input.focus(); }
 
-function addUserBubble(text, img) {
+function addUserBubble(text, previewUrl, imageId) {
   const el = document.createElement("div");
   el.className = "msg user";
-  const imgHtml = img
-    ? `<img src="${img}" style="max-height:120px;border-radius:8px;display:block;margin-bottom:6px;">`
+  // Use server URL for the chat bubble so the image remains accessible after blob revoke.
+  // Blob URL is kept only for the initial preview bar thumbnail.
+  const bubbleSrc = imageId ? `/image/${imageId}` : previewUrl;
+  const imgHtml = bubbleSrc
+    ? `<img src="${bubbleSrc}"
+           style="max-height:120px;border-radius:8px;display:block;margin-bottom:6px;cursor:zoom-in;"
+           onclick="openLightbox('/image/${imageId || ''}')"
+           title="Click để xem toàn màn hình">`
     : "";
   el.innerHTML = `<div class="avatar">🙋</div><div class="bubble"><div class="bubble-body">${imgHtml}${escHtml(text)}</div></div>`;
+  // Revoke blob URL only when not using server URL (fallback path, no imageId)
+  if (!imageId && previewUrl?.startsWith("blob:")) {
+    const imgEl = el.querySelector(".bubble-body img");
+    if (imgEl) {
+      imgEl.onload  = () => URL.revokeObjectURL(previewUrl);
+      imgEl.onerror = () => URL.revokeObjectURL(previewUrl);
+    }
+  }
   $msgs.appendChild(el);
   scrollBottom();
 }
@@ -553,41 +614,101 @@ const ctxBar = (() => {
 ctxBar.init();
 
 // ── Image upload (drag / paste) ───────────────────────────────────────────────
-let pendingImage = null; // { b64, mime, name }
+// pendingImage stores only the server-assigned UUID + a blob preview URL.
+// Raw bytes live on the server after /upload — never as a base64 string in JS.
+let pendingImage = null; // { id: string|null, mime, previewUrl, name }
 
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB raw — base64 would be ~13 MB, well under server's 20 MB
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
-function handleImageFile(file) {
+// XHR-based upload so we get onprogress events.
+function uploadWithProgress(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const fd  = new FormData();
+    fd.append("image", file);
+    xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.onload  = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText).image_id); }
+        catch { reject(new Error("invalid server response")); }
+      } else {
+        reject(new Error(`HTTP ${xhr.status}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("network error"));
+    xhr.open("POST", "/upload");
+    xhr.send(fd);
+  });
+}
+
+async function handleImageFile(file) {
   if (!file || !file.type.startsWith("image/")) return;
   if (file.size > MAX_IMAGE_BYTES) {
     alert(`Ảnh quá lớn (${(file.size / 1024 / 1024).toFixed(1)} MB). Tối đa 10 MB.`);
     return;
   }
-  const reader = new FileReader();
-  reader.onload = ev => {
-    const dataUrl = ev.target.result;           // "data:image/png;base64,..."
-    const comma   = dataUrl.indexOf(",");
-    const header  = dataUrl.slice(0, comma);    // "data:image/png;base64"
-    const b64     = dataUrl.slice(comma + 1);
-    const mime    = header.match(/data:([^;]+)/)[1];
-    const kb      = Math.round(b64.length * 3 / 4 / 1024);
-    pendingImage  = { b64, mime, name: file.name || "image" };
 
-    const bar   = document.getElementById("img-preview-bar");
-    const thumb = document.getElementById("img-preview-thumb");
-    const label = document.getElementById("img-preview-label");
-    thumb.src     = dataUrl;
-    label.textContent = `${mime} · ~${kb} KB`;
-    bar.style.display = "flex";
-  };
-  reader.readAsDataURL(file);
+  const previewUrl = URL.createObjectURL(file);
+  const kb = Math.round(file.size / 1024);
+
+  // Show preview bar immediately with spinner + progress bar
+  pendingImage = { id: null, mime: file.type, previewUrl, name: file.name || "image" };
+  document.getElementById("img-preview-thumb").src = previewUrl;
+  document.getElementById("img-preview-label").textContent = `${file.type} · ${kb} KB · đang upload…`;
+  document.getElementById("img-thumb-overlay").style.display = "flex";
+  document.getElementById("img-progress-track").style.display = "block";
+  document.getElementById("img-progress-fill").style.width = "0%";
+  document.getElementById("img-server-badge").style.display = "none";
+  document.getElementById("img-preview-bar").style.display = "flex";
+  $btn.disabled = true;  // block send until upload done
+
+  let imageId;
+  try {
+    imageId = await uploadWithProgress(file, pct => {
+      document.getElementById("img-progress-fill").style.width = `${Math.round(pct * 100)}%`;
+    });
+  } catch (err) {
+    alert(`Upload lỗi: ${err.message}`);
+    URL.revokeObjectURL(previewUrl);
+    pendingImage = null;
+    document.getElementById("img-preview-bar").style.display = "none";
+    $btn.disabled = false;
+    return;
+  }
+
+  // Upload done — update state and UI
+  pendingImage.id = imageId;
+  document.getElementById("img-progress-fill").style.width = "100%";
+  document.getElementById("img-thumb-overlay").style.display = "none";
+  document.getElementById("img-progress-track").style.display = "none";
+  document.getElementById("img-preview-label").textContent = `${file.type} · ${kb} KB`;
+  document.getElementById("img-server-badge").style.display = "inline";
+  $btn.disabled = false;
 }
 
 function clearPendingImage() {
+  // Blob URL revoked in addUserBubble.onload to avoid revoke-before-load race.
   pendingImage = null;
   document.getElementById("img-preview-bar").style.display = "none";
   document.getElementById("img-preview-thumb").src = "";
+  document.getElementById("img-server-badge").style.display = "none";
+  document.getElementById("img-thumb-overlay").style.display = "none";
+  $btn.disabled = false;
 }
+
+// ── Lightbox ──────────────────────────────────────────────────────────────────
+// openLightbox(url) — explicit URL (chat bubble); openLightbox() — reads preview bar thumb (pre-send).
+function openLightbox(url) {
+  const src = url || document.getElementById("img-preview-thumb").src;
+  if (!src || src === window.location.href) return;
+  document.getElementById("lightbox-img").src = src;
+  document.getElementById("lightbox").style.display = "flex";
+}
+function closeLightbox() {
+  document.getElementById("lightbox").style.display = "none";
+  document.getElementById("lightbox-img").src = "";
+}
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeLightbox(); });
 
 // Paste from clipboard (screenshot or copied image)
 document.addEventListener("paste", e => {
@@ -622,8 +743,9 @@ document.getElementById("form").addEventListener("submit", async e => {
 async function sendMessage(message) {
   setInputDisabled(true);
   $empty && $empty.remove();
-  const imgPreviewUrl = pendingImage ? `data:${pendingImage.mime};base64,${pendingImage.b64}` : null;
-  addUserBubble(message, imgPreviewUrl);
+  const imgSnapshot   = pendingImage;                        // capture before clearPendingImage
+  const imgPreviewUrl = imgSnapshot?.previewUrl || null;
+  addUserBubble(message, imgPreviewUrl, imgSnapshot?.id);
   showFlow("Supervisor đang phân tích...");
 
   const turns       = [];
@@ -666,8 +788,7 @@ async function sendMessage(message) {
   }
 
   try {
-    const img   = pendingImage;
-    clearPendingImage();           // clear preview immediately after send
+    clearPendingImage();           // hides preview bar; blob URL revoked in addUserBubble.onload
     const resp = await fetch("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -675,8 +796,7 @@ async function sendMessage(message) {
         message,
         session_id: sessionId,
         history,
-        image_b64:  img?.b64  || "",
-        image_mime: img?.mime || "",
+        image_id: imgSnapshot?.id || "",
       }),
     });
     if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
