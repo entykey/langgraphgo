@@ -172,9 +172,13 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 			return
 		}
 
+		// Limit request body to 20 MB — large enough for a high-res image (base64 ≈ 4/3 × raw).
+		// Prevents OOM from accidentally huge uploads; Gemini itself rejects > ~20 MB requests.
+		r.Body = http.MaxBytesReader(w, r.Body, 20<<20)
+
 		var req chatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			http.Error(w, "request too large or malformed", http.StatusRequestEntityTooLarge)
 			return
 		}
 

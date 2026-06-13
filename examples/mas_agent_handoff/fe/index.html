@@ -555,8 +555,14 @@ ctxBar.init();
 // ── Image upload (drag / paste) ───────────────────────────────────────────────
 let pendingImage = null; // { b64, mime, name }
 
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB raw — base64 would be ~13 MB, well under server's 20 MB
+
 function handleImageFile(file) {
   if (!file || !file.type.startsWith("image/")) return;
+  if (file.size > MAX_IMAGE_BYTES) {
+    alert(`Ảnh quá lớn (${(file.size / 1024 / 1024).toFixed(1)} MB). Tối đa 10 MB.`);
+    return;
+  }
   const reader = new FileReader();
   reader.onload = ev => {
     const dataUrl = ev.target.result;           // "data:image/png;base64,..."
