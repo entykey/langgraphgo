@@ -30,6 +30,10 @@ import (
 // supervisorModel is set at startup by buildGraph based on SUPERVISOR_BACKEND env.
 var supervisorModel = "gemini-3.1-flash-lite"
 
+// serverSessionID is generated once at startup so every `go run .` gets its own
+// named Langfuse session, distinct from the Python version using the same infra creds.
+var serverSessionID string
+
 const (
 	jsonAgentModel = "deepseek-v4-flash"
 	searchModel    = "gemini-3.1-flash-lite"
@@ -121,6 +125,7 @@ type messageJSON struct {
 
 func main() {
 	loadDotEnv()
+	serverSessionID = "go_mas_agent_handoff_" + lfUUID()
 	initLangfuse()
 
 	gemini := NewGeminiClient(mustEnv("GOOGLE_API_KEY"))
@@ -154,6 +159,7 @@ func configHandler(w http.ResponseWriter, _ *http.Request) {
 		"supervisor": supervisorModel,
 		"json_agent": jsonAgentModel,
 		"search":     searchModel,
+		"session_id": serverSessionID,
 	})
 }
 
@@ -181,7 +187,7 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 		traceID := lfUUID()
 		sessionID := req.SessionID
 		if sessionID == "" {
-			sessionID = lfUUID()
+			sessionID = serverSessionID
 		}
 		tags := []string{"mas-agent-handoff", "go", supervisorModel}
 		globalLF.TraceCreate(traceID, sessionID, req.Message, tags)

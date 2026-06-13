@@ -253,15 +253,16 @@
 <script>
 marked.setOptions({ breaks: true, gfm: true });
 
-const SESSION_KEY = "mas_go_session";
-let sessionId = localStorage.getItem(SESSION_KEY) || crypto.randomUUID();
-localStorage.setItem(SESSION_KEY, sessionId);
+// sessionId is sourced from the server so every `go run .` creates a new Langfuse session.
+// No localStorage — stale sessions no longer accumulate across server restarts.
+let sessionId = "";
 
 let history = [];
 let config  = { supervisor: "?", json_agent: "?", search: "?" };
 
 fetch("/config").then(r => r.json()).then(c => {
   config = c;
+  sessionId = c.session_id || ("go_mas_agent_handoff_" + crypto.randomUUID());
   document.getElementById("config-bar").innerHTML =
     `Supervisor <span>${c.supervisor}</span> → json_agent <span>${c.json_agent}</span> · web_search <span>${c.search}</span>`;
 });
