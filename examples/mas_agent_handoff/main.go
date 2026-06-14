@@ -130,6 +130,7 @@ func main() {
 	loadDotEnv()
 	serverSessionID = "go_mas_agent_handoff_" + lfUUID()
 	initLangfuse()
+	initMinio()
 
 	gemini := NewGeminiClient(mustEnv("GOOGLE_API_KEY"))
 	ds := NewDSClient(mustEnv("DEEPSEEK_API_KEY"))
@@ -185,16 +186,16 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 			return
 		}
 
-		// Resolve image: prefer UUID from cache over inline base64.
-		// Uses lookupImage (non-consuming) so /image/{id} can still serve the file afterward.
+		// Resolve image bytes for the LLM.
+		// getImageForLLM handles both MinIO (fetches from object store) and memory (reads B64).
 		imageB64, imageMime := req.ImageB64, req.ImageMime
 		if req.ImageID != "" {
-			if entry, ok := lookupImage(req.ImageID); ok {
-				imageB64 = entry.B64
-				imageMime = entry.Mime
-				fmt.Printf("[chat] resolved image_id=%s (%s)\n", req.ImageID, imageMime)
+			if b64, mime, ok := getImageForLLM(req.ImageID); ok {
+				imageB64 = b64
+				imageMime = mime
+				fmt.Printf("[chat] resolved image_id=%s (%s)\n", req.ImageID, mime)
 			} else {
-				fmt.Printf("[chat] image_id=%s not found in cache (expired or server restarted)\n", req.ImageID)
+				fmt.Printf("[chat] image_id=%s not found (expired or server restarted)\n", req.ImageID)
 			}
 		}
 

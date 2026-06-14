@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const (
@@ -198,14 +199,15 @@ func (c *DSClient) ChatWithTools(ctx context.Context, messages []dsChatMsg, tool
 // toolChoice: "required" forces a tool call (use on round 0); nil lets the model decide.
 // onToken is called for each text token when the response is a final answer.
 // Tool-call responses are accumulated silently and returned in full.
-// Returns (message, promptTokens, completionTokens, error).
+// Returns (message, promptTokens, completionTokens, firstDelta, error).
+// firstDelta is set on the very first non-empty delta — text OR tool_call — for TTFT.
 func (c *DSClient) StreamChatWithTools(
 	ctx context.Context,
 	messages []dsChatMsg,
 	tools []dsAPITool,
 	toolChoice any,
 	onToken func(string),
-) (*dsChatMsg, int, int, error) {
+) (*dsChatMsg, int, int, time.Time, error) {
 	b, err := json.Marshal(dsReq{
 		Model:         dsModel,
 		Messages:      messages,
@@ -217,23 +219,23 @@ func (c *DSClient) StreamChatWithTools(
 		StreamOptions: &dsStreamOptions{IncludeUsage: true},
 	})
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, time.Time{}, err
 	}
 	hr, err := http.NewRequestWithContext(ctx, "POST", dsAPI, bytes.NewReader(b))
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, time.Time{}, err
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	hr.Header.Set("Authorization", "Bearer "+c.apiKey)
 
 	resp, err := http.DefaultClient.Do(hr)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, time.Time{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		data, _ := io.ReadAll(resp.Body)
-		return nil, 0, 0, fmt.Errorf("DeepSeek stream %d: %s", resp.StatusCode, string(data))
+		return nil, 0, 0, time.Time{}, fmt.Errorf("DeepSeek stream %d: %s", resp.StatusCode, string(data))
 	}
 
 	// deepseek-v4-flash streams preamble text BEFORE tool_call deltas in the same
@@ -241,6 +243,7 @@ func (c *DSClient) StreamChatWithTools(
 	var contentBuf strings.Builder
 	var toolCalls []dsToolCall
 	var promptTok, completionTok int
+	var firstDelta time.Time
 
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
@@ -267,6 +270,12 @@ func (c *DSClient) StreamChatWithTools(
 		}
 		delta := chunk.Choices[0].Delta
 
+		// Capture TTFT on first meaningful delta (text or tool_call).
+		hasContent := (delta.Content != nil && *delta.Content != "") || len(delta.ToolCalls) > 0
+		if firstDelta.IsZero() && hasContent {
+			firstDelta = time.Now()
+		}
+
 		// Accumulate tool call deltas unconditionally
 		for _, tc := range delta.ToolCalls {
 			for int(tc.Index) >= len(toolCalls) {
@@ -290,7 +299,7 @@ func (c *DSClient) StreamChatWithTools(
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, 0, 0, fmt.Errorf("stream scan: %w", err)
+		return nil, 0, 0, time.Time{}, fmt.Errorf("stream scan: %w", err)
 	}
 
 	// Tool calls take priority: return them even when preamble text was also streamed.
@@ -301,11 +310,11 @@ func (c *DSClient) StreamChatWithTools(
 		s := contentBuf.String()
 		msg.Content = &s
 	}
-	return msg, promptTok, completionTok, nil
+	return msg, promptTok, completionTok, firstDelta, nil
 }
 
 // StreamReply implements SupervisorBackend for DSClient.
-func (c *DSClient) StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, error) {
+func (c *DSClient) StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, time.Time, error) {
 	dsMsgs := []dsChatMsg{{Role: "system", Content: strPtr(systemPrompt)}}
 	for _, m := range msgs {
 		role := m.Role
@@ -315,17 +324,17 @@ func (c *DSClient) StreamReply(ctx context.Context, systemPrompt string, msgs []
 		dsMsgs = append(dsMsgs, dsChatMsg{Role: role, Content: strPtr(m.Content)})
 	}
 	var sb strings.Builder
-	resp, _, _, err := c.StreamChatWithTools(ctx, dsMsgs, nil, nil, func(tok string) {
+	resp, _, _, firstDelta, err := c.StreamChatWithTools(ctx, dsMsgs, nil, nil, func(tok string) {
 		sb.WriteString(tok)
 		onToken(tok)
 	})
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	if resp.Content != nil && sb.Len() == 0 {
-		return *resp.Content, nil
+		return *resp.Content, firstDelta, nil
 	}
-	return sb.String(), nil
+	return sb.String(), firstDelta, nil
 }
 
 // buildAPITools converts ToolDef slice to the dsAPITool slice expected by the API.

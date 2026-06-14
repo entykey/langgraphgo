@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const (
@@ -152,31 +153,33 @@ func (c *GeminiClient) RouteJSON(ctx context.Context, systemPrompt, userPrompt s
 }
 
 // StreamChat streams a chat response, forwarding each token to the provided channel.
-func (c *GeminiClient) StreamChat(ctx context.Context, systemPrompt string, msgs []Message, tokCh chan<- string) error {
+// Returns firstDelta — the time of the first non-empty text chunk — for TTFT tracking.
+func (c *GeminiClient) StreamChat(ctx context.Context, systemPrompt string, msgs []Message, tokCh chan<- string) (time.Time, error) {
 	req := gRequest{
 		Contents:          c.buildContents(msgs),
 		SystemInstruction: c.sys(systemPrompt),
 	}
 	b, err := json.Marshal(req)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	url := gemBase + ":streamGenerateContent?alt=sse&key=" + c.apiKey
 	hr, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(hr)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		d, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Gemini stream %d: %s", resp.StatusCode, string(d))
+		return time.Time{}, fmt.Errorf("Gemini stream %d: %s", resp.StatusCode, string(d))
 	}
 
+	var firstDelta time.Time
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
@@ -194,39 +197,49 @@ func (c *GeminiClient) StreamChat(ctx context.Context, systemPrompt string, msgs
 		}
 		if len(gr.Candidates) > 0 && len(gr.Candidates[0].Content.Parts) > 0 {
 			if tok := gr.Candidates[0].Content.Parts[0].Text; tok != "" {
+				if firstDelta.IsZero() {
+					firstDelta = time.Now()
+				}
 				tokCh <- tok
 			}
 		}
 	}
-	return sc.Err()
+	return firstDelta, sc.Err()
 }
 
 // StreamReply implements SupervisorBackend for GeminiClient.
-func (c *GeminiClient) StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, error) {
+func (c *GeminiClient) StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, time.Time, error) {
 	tokCh := make(chan string, 256)
-	errc := make(chan error, 1)
+	type result struct {
+		firstDelta time.Time
+		err        error
+	}
+	resCh := make(chan result, 1)
 	go func() {
-		errc <- c.StreamChat(ctx, systemPrompt, msgs, tokCh)
+		fd, err := c.StreamChat(ctx, systemPrompt, msgs, tokCh)
 		close(tokCh)
+		resCh <- result{fd, err}
 	}()
 	var sb strings.Builder
 	for tok := range tokCh {
 		sb.WriteString(tok)
 		onToken(tok)
 	}
-	return sb.String(), <-errc
+	r := <-resCh
+	return sb.String(), r.firstDelta, r.err
 }
 
 // StreamChatWithImage streams a Gemini VLM response. The image is prepended to the
 // last user content part; history is carried as normal text-only messages.
-// Returns (fullText, promptTokens, completionTokens, error).
+// Returns (fullText, promptTokens, completionTokens, firstDelta, error).
+// firstDelta is the time of the first non-empty text chunk — used for TTFT.
 func (c *GeminiClient) StreamChatWithImage(
 	ctx context.Context,
 	systemPrompt string,
 	msgs []Message,
 	imageB64, imageMime string,
 	onToken func(string),
-) (string, int, int, error) {
+) (string, int, int, time.Time, error) {
 	contents := c.buildContents(msgs)
 	// Prepend the image part to the last user turn.
 	for i := len(contents) - 1; i >= 0; i-- {
@@ -244,26 +257,27 @@ func (c *GeminiClient) StreamChatWithImage(
 	}
 	b, err := json.Marshal(req)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, time.Time{}, err
 	}
 	url := gemBase + ":streamGenerateContent?alt=sse&key=" + c.apiKey
 	hr, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, time.Time{}, err
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(hr)
 	if err != nil {
-		return "", 0, 0, err
+		return "", 0, 0, time.Time{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		d, _ := io.ReadAll(resp.Body)
-		return "", 0, 0, fmt.Errorf("Gemini VLM stream %d: %s", resp.StatusCode, string(d))
+		return "", 0, 0, time.Time{}, fmt.Errorf("Gemini VLM stream %d: %s", resp.StatusCode, string(d))
 	}
 
 	var sb strings.Builder
 	var promptTok, completionTok int
+	var firstDelta time.Time
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 4<<20), 4<<20) // 4 MB — VLM responses can be longer
 	for sc.Scan() {
@@ -285,6 +299,9 @@ func (c *GeminiClient) StreamChatWithImage(
 		}
 		if len(gr.Candidates) > 0 && len(gr.Candidates[0].Content.Parts) > 0 {
 			if tok := gr.Candidates[0].Content.Parts[0].Text; tok != "" {
+				if firstDelta.IsZero() {
+					firstDelta = time.Now()
+				}
 				sb.WriteString(tok)
 				if onToken != nil {
 					onToken(tok)
@@ -293,9 +310,9 @@ func (c *GeminiClient) StreamChatWithImage(
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return "", 0, 0, fmt.Errorf("VLM stream scan: %w", err)
+		return "", 0, 0, time.Time{}, fmt.Errorf("VLM stream scan: %w", err)
 	}
-	return sb.String(), promptTok, completionTok, nil
+	return sb.String(), promptTok, completionTok, firstDelta, nil
 }
 
 const webSearchSystemPrompt = "You are a Web Search Expert. Use Google Search to find the latest information. " +

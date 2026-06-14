@@ -68,11 +68,7 @@ func jsonAgentNode(ds *DSClient) func(context.Context, AgentState) (AgentState, 
 				fmt.Sprintf("json-agent-round-%d", round+1), dsModel,
 				lfDSMsgs(msgs, 10))
 
-			var ttft time.Time
-			resp, promptTok, completionTok, err := ds.StreamChatWithTools(ctx, msgs, apiTools, toolChoice, func(tok string) {
-				if ttft.IsZero() {
-					ttft = time.Now()
-				}
+			resp, promptTok, completionTok, firstDelta, err := ds.StreamChatWithTools(ctx, msgs, apiTools, toolChoice, func(tok string) {
 				emit(state.EventCh, "token", map[string]string{"text": tok})
 				didStream = true
 			})
@@ -84,7 +80,7 @@ func jsonAgentNode(ds *DSClient) func(context.Context, AgentState) (AgentState, 
 			if resp.Content != nil {
 				roundOut["content_preview"] = truncate(*resp.Content, 200)
 			}
-			globalLF.GenerationEnd(genID, state.TraceID, roundOut, promptTok, completionTok, ttft)
+			globalLF.GenerationEnd(genID, state.TraceID, roundOut, promptTok, completionTok, firstDelta)
 			fmt.Printf("[json_agent] round %d done in %.2fs, tool_calls=%d\n",
 				round+1, time.Since(t0).Seconds(), len(resp.ToolCalls))
 

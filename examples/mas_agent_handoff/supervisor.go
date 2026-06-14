@@ -13,7 +13,9 @@ import (
 type SupervisorBackend interface {
 	// RouteJSON returns the raw JSON routing decision and prompt/completion token counts.
 	RouteJSON(ctx context.Context, systemPrompt, userPrompt string) (raw string, promptTok, completionTok int, err error)
-	StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, error)
+	// StreamReply streams a self-reply and returns (text, firstDelta, error).
+	// firstDelta is the time of the first token — used for TTFT in Langfuse.
+	StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, time.Time, error)
 }
 
 const supervisorRoutingPrompt = `You are a routing supervisor. Classify the user's latest request into exactly one option:
@@ -135,18 +137,14 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 			lfMsgs(state.Messages, 8)...)
 		globalLF.GenerationStart(replyID, state.TraceID, spanID, "supervisor-reply", supervisorModel, replyInput)
 
-		var ttft time.Time
-		text, err := backend.StreamReply(ctx, supervisorChatPrompt, state.Messages, func(tok string) {
-			if ttft.IsZero() {
-				ttft = time.Now()
-			}
+		text, firstDelta, err := backend.StreamReply(ctx, supervisorChatPrompt, state.Messages, func(tok string) {
 			emit(state.EventCh, "token", map[string]string{"text": tok})
 		})
 		if err != nil {
 			globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0, time.Time{})
 			return state, fmt.Errorf("supervisor self-reply: %w", err)
 		}
-		globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"text": truncate(text, 300)}, 0, 0, ttft)
+		globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"text": truncate(text, 300)}, 0, 0, firstDelta)
 
 		state.Messages = append(state.Messages, Message{Role: "model", Content: text, Name: "supervisor"})
 		state.Next = "FINISH"

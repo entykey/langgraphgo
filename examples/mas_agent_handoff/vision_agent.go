@@ -35,17 +35,13 @@ func visionAgentNode(gemini *GeminiClient) func(context.Context, AgentState) (Ag
 					state.ImageMime, approxBytes, lastUser)},
 			})
 
-		var ttft time.Time
-		text, promptTok, completionTok, err := gemini.StreamChatWithImage(
+		text, promptTok, completionTok, firstDelta, err := gemini.StreamChatWithImage(
 			ctx,
 			visionAgentSystemPrompt,
 			state.Messages,
 			state.ImageB64,
 			state.ImageMime,
 			func(tok string) {
-				if ttft.IsZero() {
-					ttft = time.Now()
-				}
 				emit(state.EventCh, "token", map[string]string{"text": tok})
 			},
 		)
@@ -56,7 +52,7 @@ func visionAgentNode(gemini *GeminiClient) func(context.Context, AgentState) (Ag
 
 		globalLF.GenerationEnd(genID, state.TraceID,
 			map[string]any{"text_preview": truncate(text, 300)},
-			promptTok, completionTok, ttft)
+			promptTok, completionTok, firstDelta)
 
 		fmt.Printf("[vision_agent] done — %d prompt tok, %d completion tok\n", promptTok, completionTok)
 
