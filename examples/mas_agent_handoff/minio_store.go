@@ -6,22 +6,26 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/lifecycle"
 )
 
 var minioClient *minio.Client
 var minioBucket string
 
-// initMinio connects to MinIO using MINIO_* env vars.
+// initMinio connects to MinIO using MINIO_* env vars and configures the bucket.
 // Falls back silently to in-memory store when vars are absent.
 func initMinio() {
-	endpoint  := os.Getenv("MINIO_ENDPOINT")  // e.g. "localhost:9000"
+	endpoint := os.Getenv("MINIO_ENDPOINT")
 	accessKey := os.Getenv("MINIO_ACCESS_KEY")
 	secretKey := os.Getenv("MINIO_SECRET_KEY")
-	bucket    := os.Getenv("MINIO_BUCKET")
+	bucket := os.Getenv("MINIO_BUCKET")
 	if endpoint == "" || accessKey == "" || secretKey == "" {
 		fmt.Println("[minio] disabled — set MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY to enable")
 		return
@@ -55,7 +59,35 @@ func initMinio() {
 
 	minioClient = mc
 	minioBucket = bucket
+
+	ttlDays := 30
+	if v := os.Getenv("MINIO_IMAGE_TTL_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			ttlDays = n
+		}
+	}
+	setMinioLifecycle(mc, bucket, ttlDays)
+
 	fmt.Printf("[minio] ready → %s / %s\n", endpoint, bucket)
+}
+
+// setMinioLifecycle installs an expiry rule so objects are automatically deleted after ttlDays.
+func setMinioLifecycle(mc *minio.Client, bucket string, ttlDays int) {
+	cfg := lifecycle.NewConfiguration()
+	cfg.Rules = []lifecycle.Rule{
+		{
+			ID:     "expire-images",
+			Status: "Enabled",
+			Expiration: lifecycle.Expiration{
+				Days: lifecycle.ExpirationDays(ttlDays),
+			},
+		},
+	}
+	if err := mc.SetBucketLifecycle(context.Background(), bucket, cfg); err != nil {
+		fmt.Printf("[minio] lifecycle policy error: %v\n", err)
+		return
+	}
+	fmt.Printf("[minio] lifecycle: objects expire after %d days (override: MINIO_IMAGE_TTL_DAYS)\n", ttlDays)
 }
 
 func minioEnabled() bool { return minioClient != nil }
@@ -70,8 +102,19 @@ func minioPut(id, mime string, data []byte) error {
 	return err
 }
 
-// minioStream streams an object directly to the ResponseWriter, setting headers.
-// Returns false if the object does not exist.
+// minioPresignURL generates a presigned GET URL valid for the given duration.
+// The browser can fetch the image directly from MinIO — Go is not in the data path.
+func minioPresignURL(id string, expiry time.Duration) (string, error) {
+	u, err := minioClient.PresignedGetObject(
+		context.Background(), minioBucket, id, expiry, url.Values{},
+	)
+	if err != nil {
+		return "", err
+	}
+	return u.String(), nil
+}
+
+// minioStream streams an object directly to the ResponseWriter (fallback when presign fails).
 func minioStream(w http.ResponseWriter, id string) bool {
 	obj, err := minioClient.GetObject(context.Background(), minioBucket, id, minio.GetObjectOptions{})
 	if err != nil {
@@ -80,7 +123,6 @@ func minioStream(w http.ResponseWriter, id string) bool {
 	defer obj.Close()
 	stat, err := obj.Stat()
 	if err != nil {
-		// minio returns an error on Stat() for missing objects
 		return false
 	}
 	w.Header().Set("Content-Type", stat.ContentType)
