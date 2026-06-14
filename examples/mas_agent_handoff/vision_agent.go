@@ -15,8 +15,8 @@ Mô tả những gì bạn thấy, đọc text trong ảnh nếu có, và cung c
 func visionAgentNode(gemini *GeminiClient) func(context.Context, AgentState) (AgentState, error) {
 	return func(ctx context.Context, state AgentState) (AgentState, error) {
 		emit(state.EventCh, "node_start", map[string]string{"node": "vision_agent"})
-		fmt.Printf("[vision_agent] starting — mime=%s size~%dKB\n",
-			state.ImageMime, len(state.ImageB64)*3/4/1024)
+		fmt.Printf("[vision_agent] starting — mime=%s size~%s\n",
+			state.ImageMime, fmtSize(len(state.ImageB64)*3/4))
 
 		lastUser := ""
 		for i := len(state.Messages) - 1; i >= 0; i-- {

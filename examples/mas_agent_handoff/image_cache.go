@@ -1,13 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
+
+	"golang.org/x/image/draw"
 )
 
 // imageEntry holds image metadata.
@@ -55,6 +62,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		mime = "image/jpeg"
 	}
 	id := lfUUID()
+	t0 := time.Now()
 
 	backend := "memory"
 	if minioEnabled() {
@@ -71,7 +79,9 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	fmt.Printf("[upload:%s] %s (%s, %dKB) → %s\n", backend, hdr.Filename, mime, len(data)/1024, id)
+	fmt.Printf("[upload:%s] %s (%s, %s) → %s  [%s]\n",
+		backend, hdr.Filename, mime, fmtSize(len(data)), id,
+		fmtDuration(time.Since(t0)))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
@@ -92,28 +102,92 @@ func lookupImage(id string) (imageEntry, bool) {
 }
 
 // getImageForLLM returns a base64-encoded string ready to embed in an LLM request.
-// In MinIO mode it fetches bytes from object storage and encodes them on the fly.
+// Images larger than 1.5 MB are resized to max 1536 px and re-encoded as JPEG 85%
+// before being sent to the VLM — reducing HTTP payload without affecting token count
+// (Gemini tokenises by pixel dimensions, not byte size).
+// Formats that can't be decoded by the standard library (AVIF, WebP) pass through unchanged.
 func getImageForLLM(id string) (b64, mime string, ok bool) {
 	entry, found := lookupImage(id)
 	if !found {
 		return "", "", false
 	}
+
+	var data []byte
 	if entry.B64 != "" {
-		// memory mode: already encoded
-		return entry.B64, entry.Mime, true
-	}
-	// MinIO mode: fetch bytes, encode
-	data, fetchedMime, err := minioGetBytes(id)
-	if err != nil {
-		fmt.Printf("[image] MinIO fetch error for %s: %v\n", id, err)
-		return "", "", false
-	}
-	if fetchedMime != "" {
-		mime = fetchedMime
-	} else {
+		// memory mode: decode from stored base64
+		data, _ = base64.StdEncoding.DecodeString(entry.B64)
 		mime = entry.Mime
+	} else {
+		// MinIO mode: fetch bytes
+		var fetchedMime string
+		var err error
+		data, fetchedMime, err = minioGetBytes(id)
+		if err != nil {
+			fmt.Printf("[image] MinIO fetch error for %s: %v\n", id, err)
+			return "", "", false
+		}
+		if fetchedMime != "" {
+			mime = fetchedMime
+		} else {
+			mime = entry.Mime
+		}
 	}
+
+	const compressThreshold = 1536 * 1024 // 1.5 MB
+	if len(data) > compressThreshold {
+		t0 := time.Now()
+		if compressed, err := resizeForVLM(data); err == nil {
+			fmt.Printf("[image] compressed %s → %s (JPEG) [%s]\n",
+				fmtSize(len(data)), fmtSize(len(compressed)), fmtDuration(time.Since(t0)))
+			return base64.StdEncoding.EncodeToString(compressed), "image/jpeg", true
+		}
+		// decode failed (e.g. AVIF) — fall through with original bytes
+	}
+
 	return base64.StdEncoding.EncodeToString(data), mime, true
+}
+
+const vlmMaxPx = 1536 // Gemini tile boundary (768×2)
+
+// resizeForVLM decodes img bytes, scales down to vlmMaxPx on the longest side
+// (only if larger), and re-encodes as JPEG 85%. Returns error if format unsupported.
+func resizeForVLM(data []byte) ([]byte, error) {
+	src, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= vlmMaxPx && h <= vlmMaxPx {
+		// already within limit — just re-encode as JPEG to strip PNG overhead
+		var buf bytes.Buffer
+		if err := jpeg.Encode(&buf, src, &jpeg.Options{Quality: 85}); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	}
+
+	// scale to fit within vlmMaxPx × vlmMaxPx, preserve aspect ratio
+	scale := float64(vlmMaxPx) / float64(max(w, h))
+	dw := int(float64(w) * scale)
+	dh := int(float64(h) * scale)
+
+	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	draw.BiLinear.Scale(dst, dst.Bounds(), src, b, draw.Src, nil)
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 85}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // imageHandler serves a stored image by ID (read-only).

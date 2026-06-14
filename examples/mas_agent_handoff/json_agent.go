@@ -177,6 +177,28 @@ func contains(s []string, v string) bool {
 	return false
 }
 
+func fmtDuration(d time.Duration) string {
+	switch {
+	case d >= time.Second:
+		return fmt.Sprintf("%.2fs", d.Seconds())
+	case d >= time.Millisecond:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	default:
+		return fmt.Sprintf("%dµs", d.Microseconds())
+	}
+}
+
+func fmtSize(bytes int) string {
+	switch {
+	case bytes >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(1<<20))
+	case bytes >= 1<<10:
+		return fmt.Sprintf("%d KB", bytes>>10)
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
