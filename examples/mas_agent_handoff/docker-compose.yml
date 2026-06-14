@@ -1,12 +1,13 @@
-# mas_agent_handoff — Langfuse observability stack
-# ===================================================
+# mas_agent_handoff — infra stack (Langfuse + MinIO shared by Go backend)
+# ========================================================================
 # Run: docker compose up -d
 #
 # Ports:
 #   mas-langfuse-web  -> http://localhost:3100   (Langfuse UI + API)
-#   mas-postgres      -> localhost:5533          (optional direct access)
-#   mas-clickhouse    -> 127.0.0.1:8124          (internal only)
-#   mas-minio         -> 127.0.0.1:9093          (console, internal only)
+#   mas-postgres      -> 127.0.0.1:5533         (optional direct access)
+#   mas-clickhouse    -> 127.0.0.1:8124         (internal only)
+#   mas-minio API     -> 127.0.0.1:9000         (Go backend connects here)
+#   mas-minio console -> 127.0.0.1:9093         (MinIO Web UI)
 #
 # After first boot: create a project at http://localhost:3100,
 # copy Public/Secret keys into .env as LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY.
@@ -143,7 +144,8 @@ services:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: ${MAS_MINIO_PASSWORD:-mas_minio_pw}
     ports:
-      - "127.0.0.1:9093:9090"
+      - "127.0.0.1:9000:9000"   # S3 API — Go backend connects here
+      - "127.0.0.1:9093:9090"   # Web console
     volumes:
       - mas_minio:/data
     healthcheck:
@@ -163,7 +165,8 @@ services:
       /bin/sh -c "
       mc alias set local http://mas-minio:9000 minio ${MAS_MINIO_PASSWORD:-mas_minio_pw};
       mc mb --ignore-existing local/langfuse;
-      echo 'Bucket langfuse ready.';
+      mc mb --ignore-existing local/mas-images;
+      echo 'Buckets ready: langfuse, mas-images';
       "
 
 volumes:
