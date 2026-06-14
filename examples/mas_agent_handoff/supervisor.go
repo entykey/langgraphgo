@@ -91,7 +91,7 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 		raw, promptTok, completionTok, err := backend.RouteJSON(ctx, supervisorRoutingPrompt, userPrompt)
 		if err != nil {
 			fmt.Printf("[supervisor] routing error: %v — fallback to self\n", err)
-			globalLF.GenerationEnd(routeGenID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0)
+			globalLF.GenerationEnd(routeGenID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0, time.Time{})
 			globalLF.SpanEnd(spanID, state.TraceID, map[string]any{"route": "self", "error": err.Error()})
 			state.Next = "self"
 			emit(state.EventCh, "routing", map[string]string{"decision": "self", "reasoning": "routing error"})
@@ -100,8 +100,9 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 		elapsed := time.Since(t0)
 		fmt.Printf("[supervisor] routing in %.2fs: %s\n", elapsed.Seconds(), raw)
 
+		// Routing is non-streaming — no TTFT to record.
 		globalLF.GenerationEnd(routeGenID, state.TraceID, map[string]any{"routing_json": raw},
-			promptTok, completionTok)
+			promptTok, completionTok, time.Time{})
 
 		var dec routingDecision
 		if json.Unmarshal([]byte(raw), &dec) != nil {
@@ -134,14 +135,18 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 			lfMsgs(state.Messages, 8)...)
 		globalLF.GenerationStart(replyID, state.TraceID, spanID, "supervisor-reply", supervisorModel, replyInput)
 
+		var ttft time.Time
 		text, err := backend.StreamReply(ctx, supervisorChatPrompt, state.Messages, func(tok string) {
+			if ttft.IsZero() {
+				ttft = time.Now()
+			}
 			emit(state.EventCh, "token", map[string]string{"text": tok})
 		})
 		if err != nil {
-			globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0)
+			globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0, time.Time{})
 			return state, fmt.Errorf("supervisor self-reply: %w", err)
 		}
-		globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"text": truncate(text, 300)}, 0, 0)
+		globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"text": truncate(text, 300)}, 0, 0, ttft)
 
 		state.Messages = append(state.Messages, Message{Role: "model", Content: text, Name: "supervisor"})
 		state.Next = "FINISH"

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 const visionAgentSystemPrompt = `Bạn là trợ lý phân tích hình ảnh thông minh.
@@ -34,6 +35,7 @@ func visionAgentNode(gemini *GeminiClient) func(context.Context, AgentState) (Ag
 					state.ImageMime, approxBytes, lastUser)},
 			})
 
+		var ttft time.Time
 		text, promptTok, completionTok, err := gemini.StreamChatWithImage(
 			ctx,
 			visionAgentSystemPrompt,
@@ -41,17 +43,20 @@ func visionAgentNode(gemini *GeminiClient) func(context.Context, AgentState) (Ag
 			state.ImageB64,
 			state.ImageMime,
 			func(tok string) {
+				if ttft.IsZero() {
+					ttft = time.Now()
+				}
 				emit(state.EventCh, "token", map[string]string{"text": tok})
 			},
 		)
 		if err != nil {
-			globalLF.GenerationEnd(genID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0)
+			globalLF.GenerationEnd(genID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0, time.Time{})
 			return state, fmt.Errorf("vision_agent: %w", err)
 		}
 
 		globalLF.GenerationEnd(genID, state.TraceID,
 			map[string]any{"text_preview": truncate(text, 300)},
-			promptTok, completionTok)
+			promptTok, completionTok, ttft)
 
 		fmt.Printf("[vision_agent] done — %d prompt tok, %d completion tok\n", promptTok, completionTok)
 

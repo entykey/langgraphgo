@@ -255,8 +255,10 @@ func (c *LFClient) GenerationStart(id, traceID, parentID, name, model string, in
 	return t
 }
 
-// GenerationEnd closes a generation span. Pass inputTokens=0/outTokens=0 to omit usage.
-func (c *LFClient) GenerationEnd(id, traceID string, output map[string]any, inputTokens, outTokens int) {
+// GenerationEnd closes a generation span.
+// Pass inputTokens=0/outTokens=0 to omit usage.
+// Pass a non-zero completionStart to record TTFT via Langfuse's completionStartTime field.
+func (c *LFClient) GenerationEnd(id, traceID string, output map[string]any, inputTokens, outTokens int, completionStart time.Time) {
 	body := map[string]any{
 		"id":      id,
 		"traceId": traceID,
@@ -265,6 +267,9 @@ func (c *LFClient) GenerationEnd(id, traceID string, output map[string]any, inpu
 	}
 	if inputTokens > 0 || outTokens > 0 {
 		body["usage"] = map[string]any{"input": inputTokens, "output": outTokens}
+	}
+	if !completionStart.IsZero() {
+		body["completionStartTime"] = completionStart.UTC().Format(time.RFC3339Nano)
 	}
 	c.enqueue("generation-update", body)
 }

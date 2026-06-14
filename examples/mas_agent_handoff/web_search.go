@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // webSearchNode calls Gemini with Google Search grounding (non-streaming to preserve citations).
@@ -28,13 +29,14 @@ func webSearchNode(gemini *GeminiClient) func(context.Context, AgentState) (Agen
 
 		text, citations, promptTok, completionTok, err := gemini.WebSearch(ctx, state.Messages)
 		if err != nil {
-			globalLF.GenerationEnd(genID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0)
+			globalLF.GenerationEnd(genID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0, time.Time{})
 			return state, fmt.Errorf("web_search: %w", err)
 		}
+		// WebSearch is non-streaming (returns full text at once) — no per-token TTFT.
 		globalLF.GenerationEnd(genID, state.TraceID, map[string]any{
 			"text_preview": truncate(text, 300),
 			"citations":    len(citations),
-		}, promptTok, completionTok)
+		}, promptTok, completionTok, time.Time{})
 
 		if len(citations) > 0 {
 			emit(state.EventCh, "citations", map[string]any{"count": len(citations)})
