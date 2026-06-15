@@ -6,7 +6,7 @@
 #   mas-langfuse-web  -> http://localhost:3100   (Langfuse UI + API)
 #   mas-postgres      -> 127.0.0.1:5533         (optional direct access)
 #   mas-clickhouse    -> 127.0.0.1:8124         (internal only)
-#   mas-minio API     -> 127.0.0.1:9000         (Go backend connects here)
+#   mas-minio API     -> 127.0.0.1:9010         (Go backend connects here)
 #   mas-minio console -> 127.0.0.1:9093         (MinIO Web UI)
 #
 # After first boot: create a project at http://localhost:3100,
@@ -144,7 +144,7 @@ services:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: ${MAS_MINIO_PASSWORD:-mas_minio_pw}
     ports:
-      - "127.0.0.1:9000:9000"   # S3 API — Go backend connects here
+      - "127.0.0.1:9010:9000"   # S3 API — Go backend connects here (9000 reserved for other stacks)
       - "127.0.0.1:9093:9090"   # Web console
     volumes:
       - mas_minio:/data
