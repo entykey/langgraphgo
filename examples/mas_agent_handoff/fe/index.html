@@ -298,17 +298,22 @@
   .ctx-panel { border-top: 1px solid var(--border); padding: 7px 20px 9px; flex-shrink: 0; font-size: 11px; }
   .ctx-header {
     display: flex; align-items: center; justify-content: space-between;
-    cursor: pointer; user-select: none; margin-bottom: 5px;
+    cursor: pointer; user-select: none; margin-bottom: 6px;
   }
   .ctx-title { color: var(--muted); font-family: var(--mono); letter-spacing: -.2px; }
-  .ctx-title strong { color: #c4b5fd; font-weight: 500; }
   .ctx-toggle { color: var(--muted); font-size: 10px; }
+  .ctx-agent-row { margin-bottom: 8px; }
+  .ctx-agent-row:last-child { margin-bottom: 0; }
+  .ctx-agent-label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-family: var(--mono); margin-bottom: 4px; font-size: 11px;
+  }
   .ctx-bar-track {
-    height: 10px; background: var(--surface2); border-radius: 5px;
-    overflow: hidden; display: flex; margin-bottom: 6px; gap: 1px;
+    height: 8px; background: var(--surface2); border-radius: 4px;
+    overflow: hidden; display: flex; margin-bottom: 4px; gap: 1px;
   }
   .ctx-seg { height: 100%; transition: width .25s ease; flex-shrink: 0; }
-  .ctx-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+  .ctx-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; }
   .ctx-legend-item {
     display: inline-flex; align-items: center; gap: 5px;
     color: var(--muted); font-family: var(--mono);
@@ -340,13 +345,10 @@
 
   <div class="ctx-panel" id="ctx-panel">
     <div class="ctx-header" id="ctx-toggle-btn">
-      <span class="ctx-title">Context Window · <strong id="ctx-label">—</strong></span>
+      <span class="ctx-title">Context Window</span>
       <span class="ctx-toggle" id="ctx-chevron">▾</span>
     </div>
-    <div id="ctx-body">
-      <div class="ctx-bar-track" id="ctx-bar"></div>
-      <div class="ctx-legend" id="ctx-legend"></div>
-    </div>
+    <div id="ctx-body"></div>
   </div>
 
   <div class="img-preview-bar" id="img-preview-bar" style="display:none">
@@ -611,86 +613,108 @@ function parseSse(buf) {
 }
 
 // ── Context window inspector ─────────────────────────────────────────────────
-// Actual context window limits (tokens): DeepSeek v4-flash 64K, Gemini 64K–1M
-const CTX_LIMIT = { supervisor: 1024*1024, json_agent: 64*1024, web_search: 1024*1024 };
-// Model labels shown in the bar header
-const CTX_MODEL = { supervisor: 'gemini-3.1-flash-lite · 1M', json_agent: 'deepseek-v4-flash · 64K', web_search: 'gemini-3.1-flash-lite · 1M' };
-// Estimated system prompt sizes in tokens
-const CTX_SYS   = { supervisor: 160, json_agent: 220, web_search: 100 };
 const CTX_COLOR = {
-  sys:     '#6366f1',   // indigo  — system prompt
-  history: '#f59e0b',   // amber   — conversation history
-  tools:   '#10b981',   // emerald — tool calls + results
-  output:  '#ec4899',   // pink    — current output
+  sys:     '#6366f1',  // indigo  — system prompt
+  history: '#f59e0b',  // amber   — user + AI history
+  tools:   '#10b981',  // emerald — tool calls + results
+  output:  '#ec4899',  // pink    — current output
+};
+
+// Per-agent config: label, color, model hint, context limit (tok), system-prompt estimate (tok)
+const AGENT_CFG = {
+  supervisor:   { label: '🧠 supervisor',   color: '#a78bfa', model: 'deepseek-v4-flash · 64K',    limit: 64*1024,   sys: 160 },
+  json_agent:   { label: '📦 json_agent',   color: '#60a5fa', model: 'deepseek-v4-flash · 64K',    limit: 64*1024,   sys: 220 },
+  vision_agent: { label: '🖼️ vision_agent', color: '#fb923c', model: 'gemini-3.1-flash-lite · 1M', limit: 1024*1024, sys: 80  },
 };
 
 const ctxBar = (() => {
-  const $label  = document.getElementById('ctx-label');
-  const $bar    = document.getElementById('ctx-bar');
-  const $legend = document.getElementById('ctx-legend');
+  const $body    = document.getElementById('ctx-body');
+  const $chevron = document.getElementById('ctx-chevron');
+
   document.getElementById('ctx-toggle-btn').addEventListener('click', () => {
-    const b = document.getElementById('ctx-body');
-    const c = document.getElementById('ctx-chevron');
-    const hidden = b.style.display === 'none';
-    b.style.display = hidden ? '' : 'none';
-    c.textContent   = hidden ? '▾' : '▸';
+    const hidden = $body.style.display === 'none';
+    $body.style.display = hidden ? '' : 'none';
+    $chevron.textContent = hidden ? '▾' : '▸';
   });
 
   // Chars → rough token estimate (mixed VI/EN: ~3 chars/token)
   function c2t(ch) { return Math.max(0, Math.round(ch / 3)); }
-  function fmtT(t) { return t >= 1000 ? (t / 1024).toFixed(1) + 'K' : String(t); }
+  function fmtT(t)  { return t >= 1000 ? (t / 1024).toFixed(1) + 'K' : String(t); }
 
-  const st = { agent: 'supervisor', toolChars: 0, outputChars: 0 };
+  const turnState   = {};  // { [agentKey]: { toolChars, outputChars } }
+  let activeAgents  = [];
+  let currentAgent  = null;
 
-  function render() {
-    const limit   = CTX_LIMIT[st.agent] || 64*1024;
-    const sysTok  = CTX_SYS[st.agent]   || 120;
-    const histTok = c2t(history.reduce((s, m) => s + (m.content || '').length, 0));
+  function histTok() {
+    return c2t(history.reduce((s, m) => s + (m.content || '').length, 0));
+  }
+
+  function renderRow(key, hTok) {
+    const cfg = AGENT_CFG[key] || { label: key, color: '#888', model: key, limit: 64*1024, sys: 120 };
+    const st  = turnState[key] || { toolChars: 0, outputChars: 0 };
+    const sysTok  = cfg.sys;
     const toolTok = c2t(st.toolChars);
     const outTok  = c2t(st.outputChars);
-    const total   = sysTok + histTok + toolTok + outTok;
-    const pct     = (total / limit * 100).toFixed(2);
-    const model   = CTX_MODEL[st.agent] || st.agent;
-
-    $label.textContent = `${model} · ${fmtT(total)} / ${fmtT(limit)} tok · ${pct}%`;
-
+    const total   = sysTok + hTok + toolTok + outTok;
+    const pct     = (total / cfg.limit * 100).toFixed(2);
+    // Scale bar so used slice is always visible against a 10% band for large windows
+    const displayLimit = Math.max(cfg.limit, total * 10);
     const segs = [
-      { tok: sysTok,  color: CTX_COLOR.sys,     name: 'System'  },
-      { tok: histTok, color: CTX_COLOR.history,  name: 'History' },
-      { tok: toolTok, color: CTX_COLOR.tools,    name: 'Tools'   },
-      { tok: outTok,  color: CTX_COLOR.output,   name: 'Output'  },
+      { tok: sysTok,  color: CTX_COLOR.sys,     name: 'System Prompt' },
+      { tok: hTok,    color: CTX_COLOR.history,  name: 'History' },
+      { tok: toolTok, color: CTX_COLOR.tools,    name: 'Tools' },
+      { tok: outTok,  color: CTX_COLOR.output,   name: 'Output' },
     ];
-
-    // For very large context windows (Gemini 1M) the used slice is tiny.
-    // Scale the bar so it always shows against a 10% reference band so the
-    // filled portion is still visible, but label the actual %.
-    const displayLimit = Math.max(limit, total * 10);
-
-    $bar.innerHTML = segs.map(s => {
+    const bar = segs.map(s => {
       const w = (s.tok / displayLimit * 100).toFixed(3);
       return `<div class="ctx-seg" style="width:${w}%;background:${s.color}"></div>`;
     }).join('');
-    $legend.innerHTML = segs.filter(s => s.tok > 0).map(s =>
-      `<span class="ctx-legend-item">
-         <span class="ctx-dot" style="background:${s.color}"></span>
-         ${s.name}&nbsp;<span class="ctx-val">${fmtT(s.tok)}</span>
-       </span>`
+    const legend = segs.filter(s => s.tok > 0).map(s =>
+      `<span class="ctx-legend-item"><span class="ctx-dot" style="background:${s.color}"></span>${s.name}&nbsp;<span class="ctx-val">${fmtT(s.tok)}</span></span>`
     ).join('');
+    return `<div class="ctx-agent-row">
+      <div class="ctx-agent-label">
+        <span><span style="color:${cfg.color};font-weight:500">${cfg.label}</span>&ensp;<span style="color:var(--muted)">${cfg.model}</span></span>
+        <span style="color:#c4b5fd">${fmtT(total)}&thinsp;/&thinsp;${fmtT(cfg.limit)}&thinsp;tok&thinsp;·&thinsp;${pct}%</span>
+      </div>
+      <div class="ctx-bar-track">${bar}</div>
+      <div class="ctx-legend">${legend}</div>
+    </div>`;
+  }
+
+  function render() {
+    if (activeAgents.length === 0) {
+      $body.innerHTML = '<div style="color:var(--muted);font-family:var(--mono);font-size:11px;padding:2px 0">—</div>';
+      return;
+    }
+    const hTok = histTok();
+    $body.innerHTML = activeAgents.map(k => renderRow(k, hTok)).join('');
   }
 
   return {
-    reset(agent) {
-      st.agent = agent || 'supervisor';
-      st.toolChars  = 0;
-      st.outputChars = 0;
+    newTurn() {
+      // Clear all per-turn state when user submits a new message.
+      Object.keys(turnState).forEach(k => delete turnState[k]);
+      activeAgents = [];
+      currentAgent = null;
       render();
     },
-    addToolResult(toolCount) {
-      st.toolChars += (toolCount || 1) * 700; // rough: ~700 chars/tool result
+    reset(agent) {
+      currentAgent = agent;
+      if (agent && !activeAgents.includes(agent)) {
+        activeAgents.push(agent);
+        turnState[agent] = { toolChars: 0, outputChars: 0 };
+      }
+      render();
+    },
+    addToolChars(chars) {
+      if (!currentAgent || !turnState[currentAgent]) return;
+      turnState[currentAgent].toolChars += (chars || 0);
       render();
     },
     addOutput(text) {
-      st.outputChars += (text || '').length;
+      if (!currentAgent || !turnState[currentAgent]) return;
+      turnState[currentAgent].outputChars += (text || '').length;
       render();
     },
     init() { render(); },
@@ -829,6 +853,7 @@ document.getElementById("form").addEventListener("submit", async e => {
 async function sendMessage(message) {
   setInputDisabled(true);
   $empty && $empty.remove();
+  ctxBar.newTurn();
   const imgSnapshot   = pendingImage;                        // capture before clearPendingImage
   const imgPreviewUrl = imgSnapshot?.previewUrl || null;
   addUserBubble(message, imgPreviewUrl, imgSnapshot?.id);
@@ -941,7 +966,6 @@ async function sendMessage(message) {
 
           case "tools_done":
             if (curBubble) setInfobar(curBubble, "📦 Đang tổng hợp...");
-            ctxBar.addToolResult((data.tools || []).length);
             break;
 
           case "citations": {
@@ -985,6 +1009,7 @@ async function sendMessage(message) {
                 if (body) body.textContent = data.result || "";
               }
             }
+            ctxBar.addToolChars((data.result || '').length);
             break;
           }
 
@@ -1012,7 +1037,6 @@ async function sendMessage(message) {
           case "done":
             commitCurrent();
             hideFlow();
-            ctxBar.reset('supervisor'); // reset to supervisor view after turn completes
             break;
 
           case "error": {
@@ -1028,7 +1052,6 @@ async function sendMessage(message) {
 
     history.push({ role: "user", content: message });
     for (const t of turns) history.push({ role: "model", content: t.content, name: t.agent });
-    ctxBar.reset('supervisor'); // history segment now includes this turn
 
   } catch (err) {
     hideFlow();
