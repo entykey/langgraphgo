@@ -85,22 +85,66 @@
   }
   .content-text:empty { display: none; }
 
-  /* tool-chips row — inline between text blocks, exact SSE position */
+  /* tool list — vertical stack between text blocks */
   .content-tools {
-    display: flex; flex-wrap: wrap; gap: 6px;
-    padding: 7px 14px;
+    display: flex; flex-direction: column; gap: 4px;
+    padding: 8px 14px;
     border-top: 1px solid var(--border);
     border-bottom: 1px solid var(--border);
   }
   .content-tools:first-child { border-top: none; }
 
-  .tool-chip {
-    display: inline-flex; align-items: center; gap: 4px;
-    font-size: 11px; font-family: var(--mono);
-    color: #93c5fd; background: rgba(96,165,250,.08);
-    border: 1px solid rgba(96,165,250,.18);
-    border-radius: 6px; padding: 2px 8px;
+  /* shimmer sweep — mimics Claude.ai loading state */
+  @keyframes shimmer {
+    0%   { background-position: -300% center; }
+    100% { background-position: 300% center; }
   }
+
+  .tool-item {
+    border-radius: 7px;
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,0.07);
+    font-size: 11px; font-family: var(--mono);
+  }
+  .tool-item.loading .tool-header {
+    background: linear-gradient(90deg,
+      rgba(96,165,250,.06) 0%,
+      rgba(96,165,250,.18) 40%,
+      rgba(147,197,253,.22) 50%,
+      rgba(96,165,250,.18) 60%,
+      rgba(96,165,250,.06) 100%);
+    background-size: 300% auto;
+    animation: shimmer 1.6s linear infinite;
+  }
+  .tool-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 10px;
+    background: rgba(96,165,250,.07);
+    color: #93c5fd;
+    cursor: default;
+    user-select: none;
+  }
+  .tool-item.has-result .tool-header { cursor: pointer; }
+  .tool-item.has-result .tool-header:hover { background: rgba(96,165,250,.13); }
+  .tool-label { flex: 1; }
+  .tool-chevron {
+    opacity: .5; font-size: 9px;
+    transition: transform .2s;
+    display: none;
+  }
+  .tool-item.has-result .tool-chevron { display: inline; }
+  .tool-item.expanded .tool-chevron { transform: rotate(180deg); }
+  .tool-body {
+    display: none;
+    padding: 8px 10px;
+    background: rgba(0,0,0,.25);
+    border-top: 1px solid rgba(255,255,255,.05);
+    font-size: 10.5px; color: #9ca3af;
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 280px; overflow-y: auto;
+    line-height: 1.5;
+  }
+  .tool-item.expanded .tool-body { display: block; }
 
   /* Markdown styles (apply inside .content-text) */
   .content-text p  { margin: 0 0 .6em; }
@@ -411,18 +455,37 @@ function addToolChip(bubble, name, query) {
     content.appendChild(toolsRow);
   }
 
-  const chip = document.createElement("span");
-  chip.className = "tool-chip";
-  chip.dataset.toolName = name;
-  if (name === "web_search" && query) {
-    chip.dataset.query = query;
-    chip.textContent = `🌐 "${query}"`;
-  } else {
-    chip.textContent = `🔧 ${name}`;
-  }
-  toolsRow.appendChild(chip);
+  const item = document.createElement("div");
+  item.className = "tool-item loading";
+  item.dataset.toolName = name;
+  if (query) item.dataset.query = query;
+
+  const header = document.createElement("div");
+  header.className = "tool-header";
+
+  const label = document.createElement("span");
+  label.className = "tool-label";
+  label.textContent = name === "web_search" && query ? `🌐 "${query}"` : `🔧 ${name}`;
+
+  const chevron = document.createElement("span");
+  chevron.className = "tool-chevron";
+  chevron.textContent = "▾";
+
+  header.appendChild(label);
+  header.appendChild(chevron);
+
+  const body = document.createElement("div");
+  body.className = "tool-body";
+
+  header.addEventListener("click", () => {
+    if (item.classList.contains("has-result")) item.classList.toggle("expanded");
+  });
+
+  item.appendChild(header);
+  item.appendChild(body);
+  toolsRow.appendChild(item);
   scrollBottom();
-  return chip;
+  return item;
 }
 
 // ── Text rendering ────────────────────────────────────────────────────────────
@@ -866,16 +929,30 @@ async function sendMessage(message) {
 
           case "citations": {
             curCitations = data.count || 0;
-            // Update the latest web_search chip to show found resources count.
             if (curBubble) {
-              const chips = curBubble.querySelectorAll(".tool-chip[data-tool-name='web_search']");
-              const chip = chips[chips.length - 1];
-              if (chip) {
-                const q = chip.dataset.query;
-                chip.textContent = q
+              const items = curBubble.querySelectorAll(".tool-item[data-tool-name='web_search'].loading");
+              const item = items[items.length - 1];
+              if (item) {
+                const q = item.dataset.query;
+                item.querySelector(".tool-label").textContent = q
                   ? `🌐 "${q}" · ${curCitations} nguồn`
                   : `🌐 web_search · ${curCitations} nguồn`;
                 setInfobar(curBubble, `✅ Tìm thấy ${curCitations} nguồn, đang tổng hợp...`);
+              }
+            }
+            break;
+          }
+
+          case "tool_result": {
+            // Mark the oldest still-loading chip of this tool as done and attach result.
+            if (curBubble) {
+              const items = curBubble.querySelectorAll(`.tool-item[data-tool-name="${data.name}"].loading`);
+              const item = items[0]; // FIFO: first pending = oldest call
+              if (item) {
+                item.classList.remove("loading");
+                item.classList.add("has-result");
+                const body = item.querySelector(".tool-body");
+                if (body) body.textContent = data.result || "";
               }
             }
             break;

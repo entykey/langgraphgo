@@ -115,6 +115,10 @@ func jsonAgentNode(ds *DSClient) func(context.Context, AgentState) (AgentState, 
 					globalLF.SpanStart(toolSpanID, state.TraceID, spanID, name, map[string]any{"args": tc.Function.Arguments})
 					result = callWithRetry(def, args, state.EventCh)
 					globalLF.SpanEnd(toolSpanID, state.TraceID, map[string]any{"result": truncate(result, 300)})
+					emit(state.EventCh, "tool_result", map[string]string{
+						"name":   name,
+						"result": truncateRune(result, 600),
+					})
 				}
 				fmt.Printf("[json_agent] tool result: %s...\n", truncateRune(result, 80))
 

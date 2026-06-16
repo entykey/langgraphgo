@@ -222,6 +222,10 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 			result := wsTool.Fn(args)
 			globalLF.SpanEnd(toolSpanID, state.TraceID,
 				map[string]any{"result": truncate(result, 300)})
+			emit(state.EventCh, "tool_result", map[string]string{
+				"name":   tc.Function.Name,
+				"result": truncateRune(result, 1200),
+			})
 
 			dsMsgs = append(dsMsgs, dsChatMsg{
 				Role:       "tool",
