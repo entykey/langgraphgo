@@ -11,24 +11,31 @@ import (
 // SupervisorBackend is implemented by both GeminiClient and DSClient.
 // Swap via SUPERVISOR_BACKEND env var ("gemini" | "deepseek", default: "deepseek").
 type SupervisorBackend interface {
-	// RouteJSON returns the raw JSON routing decision and prompt/completion token counts.
 	RouteJSON(ctx context.Context, systemPrompt, userPrompt string) (raw string, promptTok, completionTok int, err error)
-	// StreamReply streams a self-reply and returns (text, firstDelta, error).
-	// firstDelta is the time of the first token — used for TTFT in Langfuse.
 	StreamReply(ctx context.Context, systemPrompt string, msgs []Message, onToken func(string)) (string, time.Time, error)
 }
 
+// supervisorRoutingPrompt classifies each turn into exactly one of two buckets.
+// web_search is no longer a route — the supervisor handles it as a tool in self-reply.
 const supervisorRoutingPrompt = `You are a routing supervisor. Classify the user's latest request into exactly one option:
 
   json_agent  — any query about JSONPlaceholder data: users, posts, todos, comments
-  web_search  — needs live web info: news, prices, recent events, real-world facts
-  self        — greeting, small talk, or conversational question with NO data involved
+  self        — everything else: greetings, small talk, factual questions, web searches,
+                visual follow-up questions, health/science/general knowledge
 
-RULE: When in doubt between json_agent and self, always choose json_agent.
-Reply ONLY JSON with next first: {"next":"json_agent"|"web_search"|"self","reasoning":"one short sentence"}`
+RULE: When in doubt, always choose self.
+Reply ONLY JSON: {"next":"json_agent"|"self","reasoning":"one short sentence"}`
 
-const supervisorChatPrompt = `Bạn là trợ lý thân thiện. Trả lời ngắn gọn, tự nhiên bằng tiếng Việt.
-Nhớ lịch sử hội thoại. Không bịa dữ liệu — nếu cần dữ liệu hãy nói cần gọi tool.`
+// supervisorChatPrompt is used when the DeepSeek supervisor answers directly.
+// It has access to the web_search tool and should use it for live information.
+const supervisorChatPrompt = `Bạn là trợ lý thông minh, thân thiện. Trả lời bằng tiếng Việt.
+Nhớ lịch sử hội thoại. Không bịa thông tin.
+Khi cần thông tin thực tế mới nhất hoặc không chắc chắn, hãy gọi tool web_search.
+Khi có kết quả web_search, tổng hợp câu trả lời rõ ràng và đính kèm nguồn tham khảo.`
+
+// supervisorChatPromptSimple is used for the Gemini supervisor fallback (no tool calling).
+const supervisorChatPromptSimple = `Bạn là trợ lý thân thiện. Trả lời ngắn gọn, tự nhiên bằng tiếng Việt.
+Nhớ lịch sử hội thoại. Không bịa dữ liệu.`
 
 type routingDecision struct {
 	Reasoning string `json:"reasoning"`
@@ -36,8 +43,12 @@ type routingDecision struct {
 }
 
 // supervisorNode routes the request or self-replies.
-// It emits: node_start, routing (if routing), token (if self-reply).
-func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState) (AgentState, error) {
+// When backend is *DSClient: self-reply uses a DeepSeek ReAct loop with web_search as a tool,
+// so web results are fetched and synthesised by the supervisor itself.
+// When backend is *GeminiClient: falls back to simple StreamReply (no tool calling).
+func supervisorNode(backend SupervisorBackend, gemini *GeminiClient) func(context.Context, AgentState) (AgentState, error) {
+	ds, isDS := backend.(*DSClient)
+
 	return func(ctx context.Context, state AgentState) (AgentState, error) {
 		state.Step++
 		emit(state.EventCh, "node_start", map[string]string{"node": "supervisor"})
@@ -47,7 +58,7 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 			return state, nil
 		}
 
-		// Image present → skip LLM routing, send straight to vision_agent (Gemini VLM).
+		// Image present → skip LLM routing, go straight to vision_agent.
 		if state.ImageB64 != "" {
 			emit(state.EventCh, "routing", map[string]string{
 				"decision":  "vision_agent",
@@ -57,7 +68,7 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 			return state, nil
 		}
 
-		// Build routing prompt from conversation history
+		// Build routing prompt from conversation history.
 		lastUser := ""
 		for i := len(state.Messages) - 1; i >= 0; i-- {
 			if state.Messages[i].Role == "user" {
@@ -102,7 +113,6 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 		elapsed := time.Since(t0)
 		fmt.Printf("[supervisor] routing in %.2fs: %s\n", elapsed.Seconds(), raw)
 
-		// Routing is non-streaming — no TTFT to record.
 		globalLF.GenerationEnd(routeGenID, state.TraceID, map[string]any{"routing_json": raw},
 			promptTok, completionTok, time.Time{})
 
@@ -113,7 +123,7 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 		}
 
 		next := strings.ToLower(strings.TrimSpace(dec.Next))
-		if next != "json_agent" && next != "web_search" && next != "self" {
+		if next != "json_agent" {
 			next = "self"
 		}
 		globalLF.SpanEnd(spanID, state.TraceID, map[string]any{
@@ -129,25 +139,117 @@ func supervisorNode(backend SupervisorBackend) func(context.Context, AgentState)
 			return state, nil
 		}
 
-		// Self-reply: stream tokens via the configured backend
+		// ── Self-reply ────────────────────────────────────────────────────────────
 		emit(state.EventCh, "node_start", map[string]string{"node": "supervisor_reply"})
 
-		replyID := lfUUID()
-		replyInput := append([]map[string]any{{"role": "system", "content": supervisorChatPrompt}},
-			lfMsgs(state.Messages, 8)...)
-		globalLF.GenerationStart(replyID, state.TraceID, spanID, "supervisor-reply", supervisorModel, replyInput)
-
-		text, firstDelta, err := backend.StreamReply(ctx, supervisorChatPrompt, state.Messages, func(tok string) {
-			emit(state.EventCh, "token", map[string]string{"text": tok})
-		})
-		if err != nil {
-			globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0, time.Time{})
-			return state, fmt.Errorf("supervisor self-reply: %w", err)
+		if isDS {
+			return supervisorReplyWithTools(ctx, state, ds, gemini, spanID)
 		}
-		globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"text": truncate(text, 300)}, 0, 0, firstDelta)
-
-		state.Messages = append(state.Messages, Message{Role: "model", Content: text, Name: "supervisor"})
-		state.Next = "FINISH"
-		return state, nil
+		return supervisorReplySimple(ctx, state, backend, spanID)
 	}
+}
+
+// supervisorReplyWithTools runs a DeepSeek ReAct loop with web_search available as a tool.
+// The supervisor decides on its own whether to call web_search or answer directly.
+func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClient, gemini *GeminiClient, spanID string) (AgentState, error) {
+	wsTool := makeWebSearchTool(ctx, gemini, state.EventCh)
+	wsAPITools := buildAPITools([]ToolDef{wsTool})
+
+	dsMsgs := []dsChatMsg{{Role: "system", Content: strPtr(supervisorChatPrompt)}}
+	for _, m := range state.Messages {
+		role := m.Role
+		if role == "model" {
+			role = "assistant"
+		}
+		dsMsgs = append(dsMsgs, dsChatMsg{Role: role, Content: strPtr(m.Content)})
+	}
+
+	fullText := ""
+	var replyFirstDelta time.Time
+
+	for round := 0; round < 4; round++ {
+		replyID := lfUUID()
+		globalLF.GenerationStart(replyID, state.TraceID, spanID,
+			fmt.Sprintf("supervisor-reply-r%d", round+1), supervisorModel,
+			lfDSMsgs(dsMsgs, 8))
+
+		resp, promptTok, completionTok, firstDelta, err := ds.StreamChatWithTools(
+			ctx, dsMsgs, wsAPITools, nil,
+			func(tok string) {
+				emit(state.EventCh, "token", map[string]string{"text": tok})
+			},
+		)
+		if err != nil {
+			globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"error": err.Error()}, promptTok, completionTok, time.Time{})
+			return state, fmt.Errorf("supervisor reply: %w", err)
+		}
+		if replyFirstDelta.IsZero() {
+			replyFirstDelta = firstDelta
+		}
+
+		// Final answer round — no tool calls.
+		if len(resp.ToolCalls) == 0 {
+			if resp.Content != nil {
+				fullText = *resp.Content
+			}
+			globalLF.GenerationEnd(replyID, state.TraceID,
+				map[string]any{"text": truncate(fullText, 300)},
+				promptTok, completionTok, replyFirstDelta)
+			break
+		}
+
+		// Tool call round.
+		globalLF.GenerationEnd(replyID, state.TraceID,
+			map[string]any{"tool_calls": len(resp.ToolCalls)},
+			promptTok, completionTok, firstDelta)
+		dsMsgs = append(dsMsgs, *resp)
+
+		for _, tc := range resp.ToolCalls {
+			emit(state.EventCh, "tool_call", map[string]string{"name": tc.Function.Name})
+			fmt.Printf("[supervisor] tool: %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
+
+			var args map[string]any
+			if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil {
+				args = map[string]any{}
+			}
+
+			toolSpanID := lfUUID()
+			globalLF.SpanStart(toolSpanID, state.TraceID, spanID, tc.Function.Name,
+				map[string]any{"args": tc.Function.Arguments})
+			result := wsTool.Fn(args)
+			globalLF.SpanEnd(toolSpanID, state.TraceID,
+				map[string]any{"result": truncate(result, 300)})
+
+			dsMsgs = append(dsMsgs, dsChatMsg{
+				Role:       "tool",
+				Content:    strPtr(result),
+				ToolCallID: tc.ID,
+			})
+		}
+	}
+
+	state.Messages = append(state.Messages, Message{Role: "model", Content: fullText, Name: "supervisor"})
+	state.Next = "FINISH"
+	return state, nil
+}
+
+// supervisorReplySimple is used when the Gemini backend is active (no tool calling).
+func supervisorReplySimple(ctx context.Context, state AgentState, backend SupervisorBackend, spanID string) (AgentState, error) {
+	replyID := lfUUID()
+	replyInput := append([]map[string]any{{"role": "system", "content": supervisorChatPromptSimple}},
+		lfMsgs(state.Messages, 8)...)
+	globalLF.GenerationStart(replyID, state.TraceID, spanID, "supervisor-reply", supervisorModel, replyInput)
+
+	text, firstDelta, err := backend.StreamReply(ctx, supervisorChatPromptSimple, state.Messages, func(tok string) {
+		emit(state.EventCh, "token", map[string]string{"text": tok})
+	})
+	if err != nil {
+		globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0, time.Time{})
+		return state, fmt.Errorf("supervisor self-reply: %w", err)
+	}
+	globalLF.GenerationEnd(replyID, state.TraceID, map[string]any{"text": truncate(text, 300)}, 0, 0, firstDelta)
+
+	state.Messages = append(state.Messages, Message{Role: "model", Content: text, Name: "supervisor"})
+	state.Next = "FINISH"
+	return state, nil
 }

@@ -2,64 +2,55 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 )
 
-// webSearchNode calls Gemini with Google Search grounding (non-streaming to preserve citations).
-func webSearchNode(gemini *GeminiClient) func(context.Context, AgentState) (AgentState, error) {
-	return func(ctx context.Context, state AgentState) (AgentState, error) {
-		emit(state.EventCh, "node_start", map[string]string{"node": "web_search"})
-		fmt.Println("[web_search] starting")
-
-		lastUser := ""
-		for i := len(state.Messages) - 1; i >= 0; i-- {
-			if state.Messages[i].Role == "user" {
-				lastUser = state.Messages[i].Content
-				break
+// makeWebSearchTool returns a ToolDef that calls Gemini with Google Search grounding.
+// It is registered in the supervisor's self-reply ReAct loop so the supervisor —
+// not a standalone node — owns the final answer and can weave citations in naturally.
+func makeWebSearchTool(ctx context.Context, gemini *GeminiClient, eventCh chan<- SSEEvent) ToolDef {
+	return ToolDef{
+		Name:        "web_search",
+		Description: "Search the web for current information: news, prices, recent events, medical facts, anything requiring up-to-date data. Returns findings and source citations.",
+		Parameters: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"query": {
+					"type": "string",
+					"description": "Search query in Vietnamese or English"
+				}
+			},
+			"required": ["query"]
+		}`),
+		Fn: func(args map[string]any) string {
+			query, _ := args["query"].(string)
+			if query == "" {
+				return "Error: missing query argument"
 			}
-		}
-		genID := lfUUID()
-		globalLF.GenerationStart(genID, state.TraceID, "", "web_search", gemModel,
-			[]map[string]any{
-				{"role": "system", "content": webSearchSystemPrompt},
-				{"role": "user", "content": lastUser},
-			})
+			fmt.Printf("[web_search] query: %s\n", query)
 
-		text, citations, promptTok, completionTok, err := gemini.WebSearch(ctx, state.Messages)
-		if err != nil {
-			globalLF.GenerationEnd(genID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0, time.Time{})
-			return state, fmt.Errorf("web_search: %w", err)
-		}
-		// WebSearch is non-streaming (returns full text at once) — no per-token TTFT.
-		globalLF.GenerationEnd(genID, state.TraceID, map[string]any{
-			"text_preview": truncate(text, 300),
-			"citations":    len(citations),
-		}, promptTok, completionTok, time.Time{})
+			msgs := []Message{{Role: "user", Content: query}}
+			text, citations, _, _, err := gemini.WebSearch(ctx, msgs)
+			if err != nil {
+				return "Error searching web: " + err.Error()
+			}
 
-		if len(citations) > 0 {
-			emit(state.EventCh, "citations", map[string]any{"count": len(citations)})
+			if len(citations) > 0 {
+				emit(eventCh, "citations", map[string]any{"count": len(citations)})
+			}
+
+			// Return findings + citations as a structured string for DeepSeek to synthesise.
 			var sb strings.Builder
 			sb.WriteString(text)
-			sb.WriteString("\n\n---\n**Nguồn:**\n")
-			for i, c := range citations {
-				fmt.Fprintf(&sb, "%d. [%s](%s)\n", i+1, c.Title, c.URL)
+			if len(citations) > 0 {
+				sb.WriteString("\n\n---\n**Nguồn tham khảo:**\n")
+				for i, c := range citations {
+					fmt.Fprintf(&sb, "%d. [%s](%s)\n", i+1, c.Title, c.URL)
+				}
 			}
-			text = sb.String()
-		}
-
-		if strings.TrimSpace(text) == "" {
-			text = "Không tìm thấy kết quả từ Google Search."
-		}
-
-		emit(state.EventCh, "token_batch", map[string]string{"text": text})
-
-		state.Messages = append(state.Messages, Message{
-			Role:    "model",
-			Content: text,
-			Name:    "web_search",
-		})
-		return state, nil
+			return sb.String()
+		},
 	}
 }
