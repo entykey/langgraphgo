@@ -196,6 +196,29 @@
   .badge.ttft { color: #374151; font-family: var(--mono); letter-spacing: -.3px; }
   .badge.reasoning { color: #4b5563; font-style: italic; max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
 
+  /* AI logo — bottom-left of message row, animates while generating */
+  .msg.ai { gap: 10px; align-items: flex-end; }
+  .ai-logo {
+    font-size: 17px; line-height: 1; flex-shrink: 0;
+    color: var(--accent); opacity: .4;
+    width: 20px; text-align: center;
+    padding-bottom: 3px;
+    transition: opacity .4s;
+    display: block;
+  }
+  .ai-logo.generating {
+    opacity: 1;
+    animation: ai-think 1s ease-in-out infinite;
+  }
+  .ai-logo.streaming {
+    opacity: .85;
+    animation: spin 2.4s linear infinite;
+  }
+  @keyframes ai-think {
+    0%,100% { transform: rotate(0deg) scale(1);    opacity: .85; }
+    50%      { transform: rotate(180deg) scale(1.2); opacity: 1;  }
+  }
+
   /* streaming cursor */
   .cursor::after { content: "▋"; animation: blink .7s step-end infinite; color: var(--accent); }
   @keyframes blink { 50% { opacity: 0; } }
@@ -409,7 +432,7 @@ function createAiBubble(infoLabel) {
   const el = document.createElement("div");
   el.className = "msg ai";
   el.innerHTML = `
-    <div class="avatar">🤖</div>
+    <div class="ai-logo generating">✳</div>
     <div class="bubble">
       <div class="bubble-infobar">
         <div class="spinner"></div>
@@ -520,6 +543,9 @@ function setBatchText(bubble, text) {
 function finishBubble(bubble, agent, citations, ttft, reasoning) {
   bubble.querySelectorAll(".content-text.cursor").forEach(b => b.classList.remove("cursor"));
   hideInfobar(bubble);
+  // Logo: stop animation, rest as static dim icon
+  const logo = bubble.querySelector('.ai-logo');
+  if (logo) { logo.classList.remove('generating', 'streaming'); }
   const meta = bubble.querySelector(".bubble-meta");
 
   if (ttft != null) {
@@ -878,8 +904,12 @@ async function sendMessage(message) {
   }
 
   function markFirstToken() {
-    if (curAgentStart != null && curTtft == null)
+    if (curAgentStart != null && curTtft == null) {
       curTtft = ((Date.now() - curAgentStart) / 1000).toFixed(1);
+      // Switch logo: thinking pulse → gentle spin (first token arrived)
+      const logo = curBubble?.querySelector('.ai-logo');
+      if (logo) { logo.classList.remove('generating'); logo.classList.add('streaming'); }
+    }
   }
 
   function ensureBubble(label) {
