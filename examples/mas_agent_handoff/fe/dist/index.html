@@ -107,14 +107,18 @@
     font-size: 11px; font-family: var(--mono);
   }
   .tool-item.loading .tool-header {
-    background: linear-gradient(90deg,
-      rgba(96,165,250,.06) 0%,
-      rgba(96,165,250,.18) 40%,
-      rgba(147,197,253,.22) 50%,
-      rgba(96,165,250,.18) 60%,
-      rgba(96,165,250,.06) 100%);
-    background-size: 300% auto;
-    animation: shimmer 1.6s linear infinite;
+    color: #fbbf24;
+    background: rgba(251,191,36,.06);
+  }
+  .tool-item.loading .tool-header::before {
+    content: "";
+    display: inline-block;
+    width: 9px; height: 9px;
+    border: 1.5px solid rgba(251,191,36,.25);
+    border-top-color: #fbbf24;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    flex-shrink: 0;
   }
   .tool-header {
     display: flex; align-items: center; gap: 6px;
@@ -124,8 +128,19 @@
     cursor: default;
     user-select: none;
   }
-  .tool-item.has-result .tool-header { cursor: pointer; }
-  .tool-item.has-result .tool-header:hover { background: rgba(96,165,250,.13); }
+  .tool-item.has-result .tool-header {
+    cursor: pointer;
+    color: #4ade80;
+    background: rgba(74,222,128,.06);
+  }
+  .tool-item.has-result .tool-header::before {
+    content: "✓";
+    color: #4ade80;
+    font-size: 10px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .tool-item.has-result .tool-header:hover { background: rgba(74,222,128,.13); }
   .tool-label { flex: 1; }
   .tool-chevron {
     opacity: .5; font-size: 9px;
@@ -144,7 +159,8 @@
     max-height: 280px; overflow-y: auto;
     line-height: 1.5;
   }
-  .tool-item.expanded .tool-body { display: block; }
+  .tool-item.expanded .tool-body,
+  .tool-item.loading.streaming .tool-body { display: block; }
 
   /* Markdown styles (apply inside .content-text) */
   .content-text p  { margin: 0 0 .6em; }
@@ -818,13 +834,14 @@ async function sendMessage(message) {
   addUserBubble(message, imgPreviewUrl, imgSnapshot?.id);
   showFlow("Supervisor đang phân tích...");
 
-  const turns       = [];
-  let curBubble     = null;
-  let curAgent      = null;
-  let curCitations  = 0;
-  let curAgentStart = null;
-  let curTtft       = null;
-  let curReasoning  = '';
+  const turns        = [];
+  let curBubble      = null;
+  let curAgent       = null;
+  let curCitations   = 0;
+  let curAgentStart  = null;
+  let curTtft        = null;
+  let curReasoning   = '';
+  let toolsCollapsed = false;
 
   const NODE_LABEL = {
     supervisor_reply: "🧠 Supervisor đang trả lời...",
@@ -845,7 +862,7 @@ async function sendMessage(message) {
     const texts = [...curBubble.querySelectorAll(".content-text")]
       .map(b => b._raw || b.textContent).filter(Boolean).join("\n\n");
     if (curAgent) turns.push({ agent: curAgent, content: texts });
-    curBubble = null; curAgent = null; curCitations = 0; curAgentStart = null; curTtft = null; curReasoning = '';
+    curBubble = null; curAgent = null; curCitations = 0; curAgentStart = null; curTtft = null; curReasoning = ''; toolsCollapsed = false;
   }
 
   function markFirstToken() {
@@ -931,7 +948,7 @@ async function sendMessage(message) {
             curCitations = data.count || 0;
             if (curBubble) {
               const items = curBubble.querySelectorAll(".tool-item[data-tool-name='web_search'].loading");
-              const item = items[items.length - 1];
+              const item = items[0]; // FIFO
               if (item) {
                 const q = item.dataset.query;
                 item.querySelector(".tool-label").textContent = q
@@ -943,13 +960,26 @@ async function sendMessage(message) {
             break;
           }
 
+          case "tool_stream": {
+            if (curBubble) {
+              const items = curBubble.querySelectorAll(`.tool-item[data-tool-name="${data.name}"].loading`);
+              const item = items[0]; // FIFO
+              if (item) {
+                item.classList.add("streaming");
+                const body = item.querySelector(".tool-body");
+                if (body) { body.textContent += data.text || ""; scrollBottom(); }
+              }
+            }
+            break;
+          }
+
           case "tool_result": {
             // Mark the oldest still-loading chip of this tool as done and attach result.
             if (curBubble) {
               const items = curBubble.querySelectorAll(`.tool-item[data-tool-name="${data.name}"].loading`);
               const item = items[0]; // FIFO: first pending = oldest call
               if (item) {
-                item.classList.remove("loading");
+                item.classList.remove("loading", "streaming");
                 item.classList.add("has-result");
                 const body = item.querySelector(".tool-body");
                 if (body) body.textContent = data.result || "";
@@ -962,6 +992,13 @@ async function sendMessage(message) {
             ensureBubble();
             markFirstToken();
             ctxBar.addOutput(data.text);
+            // On first outer-agent token, collapse any open / streaming tool bodies.
+            if (!toolsCollapsed && curBubble) {
+              toolsCollapsed = true;
+              curBubble.querySelectorAll(".tool-item.streaming, .tool-item.expanded").forEach(item => {
+                item.classList.remove("streaming", "expanded");
+              });
+            }
             appendToken(curBubble, data.text);
             break;
 

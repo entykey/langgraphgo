@@ -355,3 +355,81 @@ func (c *GeminiClient) WebSearch(ctx context.Context, msgs []Message) (string, [
 	}
 	return text, citations, promptTok, completionTok, nil
 }
+
+// StreamWebSearch streams a Gemini response with Google Search grounding.
+// Tokens are forwarded to onToken as they arrive; grounding citations are returned on completion.
+func (c *GeminiClient) StreamWebSearch(ctx context.Context, msgs []Message, onToken func(string)) (string, []Citation, int, int, error) {
+	req := gRequest{
+		Contents:          c.buildContents(msgs),
+		SystemInstruction: c.sys(webSearchSystemPrompt),
+		Tools:             []map[string]any{{"googleSearch": map[string]any{}}},
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return "", nil, 0, 0, err
+	}
+	url := gemBase + ":streamGenerateContent?alt=sse&key=" + c.apiKey
+	hr, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(b))
+	if err != nil {
+		return "", nil, 0, 0, err
+	}
+	hr.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(hr)
+	if err != nil {
+		return "", nil, 0, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		d, _ := io.ReadAll(resp.Body)
+		return "", nil, 0, 0, fmt.Errorf("Gemini search stream %d: %s", resp.StatusCode, string(d))
+	}
+
+	var sb strings.Builder
+	var citations []Citation
+	seenCitations := map[string]bool{}
+	var promptTok, completionTok int
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			break
+		}
+		var gr gResponse
+		if json.Unmarshal([]byte(payload), &gr) != nil {
+			continue
+		}
+		if gr.UsageMetadata != nil {
+			promptTok = gr.UsageMetadata.PromptTokenCount
+			completionTok = gr.UsageMetadata.CandidatesTokenCount
+		}
+		if len(gr.Candidates) == 0 {
+			continue
+		}
+		cand := gr.Candidates[0]
+		if len(cand.Content.Parts) > 0 {
+			if tok := cand.Content.Parts[0].Text; tok != "" {
+				sb.WriteString(tok)
+				if onToken != nil {
+					onToken(tok)
+				}
+			}
+		}
+		if cand.GroundingMetadata != nil {
+			for _, ch := range cand.GroundingMetadata.GroundingChunks {
+				if ch.Web != nil && !seenCitations[ch.Web.URI] {
+					seenCitations[ch.Web.URI] = true
+					citations = append(citations, Citation{Title: ch.Web.Title, URL: ch.Web.URI})
+				}
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return "", nil, 0, 0, fmt.Errorf("web search stream scan: %w", err)
+	}
+	return sb.String(), citations, promptTok, completionTok, nil
+}

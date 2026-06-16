@@ -32,7 +32,9 @@ func makeWebSearchTool(ctx context.Context, gemini *GeminiClient, eventCh chan<-
 			fmt.Printf("[web_search] query: %s\n", query)
 
 			msgs := []Message{{Role: "user", Content: query}}
-			text, citations, _, _, err := gemini.WebSearch(ctx, msgs)
+			text, citations, _, _, err := gemini.StreamWebSearch(ctx, msgs, func(tok string) {
+				emit(eventCh, "tool_stream", map[string]string{"name": "web_search", "text": tok})
+			})
 			if err != nil {
 				return "Error searching web: " + err.Error()
 			}
