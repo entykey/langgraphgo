@@ -196,27 +196,25 @@
   .badge.ttft { color: #374151; font-family: var(--mono); letter-spacing: -.3px; }
   .badge.reasoning { color: #4b5563; font-style: italic; max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
 
-  /* AI logo — bottom-left of message row, animates while generating */
-  .msg.ai { gap: 10px; align-items: flex-end; }
+  /* AI logo — standalone block below the last AI message, not inside the row */
   .ai-logo {
-    font-size: 17px; line-height: 1; flex-shrink: 0;
-    color: var(--accent); opacity: .4;
-    width: 20px; text-align: center;
-    padding-bottom: 3px;
+    font-size: 15px; line-height: 1;
+    color: var(--accent); opacity: .35;
+    margin: -2px 0 6px 2px;
+    display: block; width: 20px; text-align: center;
     transition: opacity .4s;
-    display: block;
   }
   .ai-logo.generating {
     opacity: 1;
     animation: ai-think 1s ease-in-out infinite;
   }
   .ai-logo.streaming {
-    opacity: .85;
+    opacity: .8;
     animation: spin 2.4s linear infinite;
   }
   @keyframes ai-think {
-    0%,100% { transform: rotate(0deg) scale(1);    opacity: .85; }
-    50%      { transform: rotate(180deg) scale(1.2); opacity: 1;  }
+    0%,100% { transform: rotate(0deg) scale(1);    opacity: .8; }
+    50%      { transform: rotate(180deg) scale(1.2); opacity: 1; }
   }
 
   /* streaming cursor */
@@ -426,13 +424,22 @@ function showFlow(text) {
 }
 function hideFlow() { if ($flow) { $flow.remove(); $flow = null; } }
 
+// ── AI logo singleton — lives below the active bubble in $msgs, not inside the row ──
+const $aiLogo = (() => {
+  const el = document.createElement("div");
+  el.className = "ai-logo";
+  el.textContent = "✳";
+  return el;
+})();
+
 // ── Bubble factory ───────────────────────────────────────────────────────────
 function createAiBubble(infoLabel) {
   hideFlow();
+  // Remove logo from previous position (only one active at a time)
+  $aiLogo.remove();
   const el = document.createElement("div");
   el.className = "msg ai";
   el.innerHTML = `
-    <div class="ai-logo generating">✳</div>
     <div class="bubble">
       <div class="bubble-infobar">
         <div class="spinner"></div>
@@ -442,6 +449,9 @@ function createAiBubble(infoLabel) {
       <div class="bubble-meta"></div>
     </div>`;
   $msgs.appendChild(el);
+  // Place logo as a sibling AFTER the bubble, not inside it
+  $aiLogo.className = "ai-logo generating";
+  $msgs.appendChild($aiLogo);
   scrollBottom();
   return el;
 }
@@ -543,9 +553,7 @@ function setBatchText(bubble, text) {
 function finishBubble(bubble, agent, citations, ttft, reasoning) {
   bubble.querySelectorAll(".content-text.cursor").forEach(b => b.classList.remove("cursor"));
   hideInfobar(bubble);
-  // Logo: stop animation, rest as static dim icon
-  const logo = bubble.querySelector('.ai-logo');
-  if (logo) { logo.classList.remove('generating', 'streaming'); }
+  $aiLogo.classList.remove('generating', 'streaming'); // rest as dim static
   const meta = bubble.querySelector(".bubble-meta");
 
   if (ttft != null) {
@@ -866,6 +874,7 @@ document.getElementById("form").addEventListener("submit", async e => {
 async function sendMessage(message) {
   setInputDisabled(true);
   $empty && $empty.remove();
+  $aiLogo.remove(); // clear logo from previous turn
   ctxBar.newTurn();
   const imgSnapshot   = pendingImage;                        // capture before clearPendingImage
   const imgPreviewUrl = imgSnapshot?.previewUrl || null;
@@ -906,9 +915,8 @@ async function sendMessage(message) {
   function markFirstToken() {
     if (curAgentStart != null && curTtft == null) {
       curTtft = ((Date.now() - curAgentStart) / 1000).toFixed(1);
-      // Switch logo: thinking pulse → gentle spin (first token arrived)
-      const logo = curBubble?.querySelector('.ai-logo');
-      if (logo) { logo.classList.remove('generating'); logo.classList.add('streaming'); }
+      $aiLogo.classList.remove('generating');
+      $aiLogo.classList.add('streaming');
     }
   }
 
