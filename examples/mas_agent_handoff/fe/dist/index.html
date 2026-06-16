@@ -199,10 +199,11 @@
   /* AI logo — standalone block below the last AI message, not inside the row */
   .ai-logo {
     font-size: 32px; line-height: 1;
-    color: var(--accent); opacity: .35;
+    color: var(--accent); opacity: .55;
     margin: 2px 0 8px 0;
     display: block; width: 36px; text-align: center;
     transition: opacity .4s;
+    -webkit-text-stroke: 0.5px var(--accent);
   }
   .ai-logo.generating {
     opacity: 1;
@@ -428,7 +429,7 @@ function hideFlow() { if ($flow) { $flow.remove(); $flow = null; } }
 const $aiLogo = (() => {
   const el = document.createElement("div");
   el.className = "ai-logo";
-  el.textContent = "✳";
+  el.textContent = "✴";
   return el;
 })();
 
