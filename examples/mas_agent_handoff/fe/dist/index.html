@@ -683,12 +683,8 @@ const ctxBar = (() => {
   }
 
   function render() {
-    if (activeAgents.length === 0) {
-      $body.innerHTML = '<div style="color:var(--muted);font-family:var(--mono);font-size:11px;padding:2px 0">—</div>';
-      return;
-    }
     const hTok = histTok();
-    $body.innerHTML = activeAgents.map(k => renderRow(k, hTok)).join('');
+    $body.innerHTML = Object.keys(AGENT_CFG).map(k => renderRow(k, hTok)).join('');
   }
 
   return {
