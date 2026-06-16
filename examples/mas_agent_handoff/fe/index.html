@@ -392,7 +392,7 @@ function getTextBlock(bubble) {
   return last;
 }
 
-function addToolChip(bubble, name) {
+function addToolChip(bubble, name, query) {
   if (!bubble) return;
   hideInfobar(bubble);
   const content = bubble.querySelector(".bubble-content");
@@ -413,9 +413,16 @@ function addToolChip(bubble, name) {
 
   const chip = document.createElement("span");
   chip.className = "tool-chip";
-  chip.textContent = `🔧 ${name}`;
+  chip.dataset.toolName = name;
+  if (name === "web_search" && query) {
+    chip.dataset.query = query;
+    chip.textContent = `🌐 "${query}"`;
+  } else {
+    chip.textContent = `🔧 ${name}`;
+  }
   toolsRow.appendChild(chip);
   scrollBottom();
+  return chip;
 }
 
 // ── Text rendering ────────────────────────────────────────────────────────────
@@ -837,11 +844,16 @@ async function sendMessage(message) {
             break;
           }
 
-          case "tool_call":
+          case "tool_call": {
             ensureBubble();
-            setInfobar(curBubble, `🔧 ${data.name}()...`);
-            addToolChip(curBubble, data.name);
+            const isWS = data.name === "web_search";
+            const infoText = isWS && data.query
+              ? `🌐 Đang tìm kiếm: "${data.query}"...`
+              : `🔧 ${data.name}()...`;
+            setInfobar(curBubble, infoText);
+            addToolChip(curBubble, data.name, data.query);
             break;
+          }
 
           case "tool_retry":
             if (curBubble) setInfobar(curBubble, `🔄 ${data.info}`);
@@ -852,9 +864,22 @@ async function sendMessage(message) {
             ctxBar.addToolResult((data.tools || []).length);
             break;
 
-          case "citations":
+          case "citations": {
             curCitations = data.count || 0;
+            // Update the latest web_search chip to show found resources count.
+            if (curBubble) {
+              const chips = curBubble.querySelectorAll(".tool-chip[data-tool-name='web_search']");
+              const chip = chips[chips.length - 1];
+              if (chip) {
+                const q = chip.dataset.query;
+                chip.textContent = q
+                  ? `🌐 "${q}" · ${curCitations} nguồn`
+                  : `🌐 web_search · ${curCitations} nguồn`;
+                setInfobar(curBubble, `✅ Tìm thấy ${curCitations} nguồn, đang tổng hợp...`);
+              }
+            }
             break;
+          }
 
           case "token":
             ensureBubble();

@@ -205,13 +205,16 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 		dsMsgs = append(dsMsgs, *resp)
 
 		for _, tc := range resp.ToolCalls {
-			emit(state.EventCh, "tool_call", map[string]string{"name": tc.Function.Name})
-			fmt.Printf("[supervisor] tool: %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
-
 			var args map[string]any
 			if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil {
 				args = map[string]any{}
 			}
+			toolEvt := map[string]string{"name": tc.Function.Name}
+			if q, _ := args["query"].(string); q != "" {
+				toolEvt["query"] = q
+			}
+			emit(state.EventCh, "tool_call", toolEvt)
+			fmt.Printf("[supervisor] tool: %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
 
 			toolSpanID := lfUUID()
 			globalLF.SpanStart(toolSpanID, state.TraceID, spanID, tc.Function.Name,
