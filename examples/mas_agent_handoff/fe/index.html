@@ -302,8 +302,11 @@
   }
   .ctx-title { color: var(--muted); font-family: var(--mono); letter-spacing: -.2px; }
   .ctx-toggle { color: var(--muted); font-size: 10px; }
-  .ctx-agent-row { margin-bottom: 8px; }
-  .ctx-agent-row:last-child { margin-bottom: 0; }
+  .ctx-agent-row {
+    margin-bottom: 8px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .ctx-agent-row:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
   .ctx-agent-label {
     display: flex; justify-content: space-between; align-items: baseline;
     font-family: var(--mono); margin-bottom: 4px; font-size: 11px;
