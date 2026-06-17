@@ -231,7 +231,11 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 		for _, m := range req.History {
 			msgs = append(msgs, Message{Role: m.Role, Content: m.Content, Name: m.Name})
 		}
-		msgs = append(msgs, Message{Role: "user", Content: req.Message})
+		userContent := req.Message
+		if req.ImageID != "" {
+			userContent += fmt.Sprintf("\n[Ảnh đính kèm — gọi read_image(file_id: \"%s\") để phân tích ảnh này]", req.ImageID)
+		}
+		msgs = append(msgs, Message{Role: "user", Content: userContent})
 
 		// Langfuse trace for this turn
 		traceID := lfUUID()

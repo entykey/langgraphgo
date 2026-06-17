@@ -901,7 +901,9 @@ $layout.addEventListener("drop", e => {
   e.preventDefault();
   $layout.classList.remove("drag-over");
   const file = e.dataTransfer?.files[0];
-  if (file?.type.startsWith("image/")) handleImageFile(file);
+  if (!file) return;
+  if (file.type.startsWith("image/")) handleImageFile(file);
+  else handleDocFile(file);
 });
 
 // ── Document file upload ──────────────────────────────────────────────────────
@@ -932,31 +934,21 @@ function removeFileAt(i) {
   renderFilesBar();
 }
 
-async function handleDocFileInput(input) {
-  const file = input.files?.[0];
-  input.value = "";            // allow re-selecting same file
-  if (!file) return;
+async function handleDocFile(file) {
   if (file.size > 20 * 1024 * 1024) {
     alert(`File quá lớn (${(file.size / 1024 / 1024).toFixed(1)} MB). Tối đa 20 MB.`);
     return;
   }
-
-  // For images, use the existing upload path which does compression.
-  if (file.type.startsWith("image/")) { handleImageFile(file); return; }
-
-  // Show a placeholder chip while uploading.
   const placeholder = { id: null, name: file.name, mime: file.type || "application/octet-stream",
                          size_kb: Math.round(file.size / 1024), status: "uploading" };
   fileRegistry.push(placeholder);
   renderFilesBar();
-
   const fd = new FormData();
   fd.append("file", file);
   try {
     const resp = await fetch("/upload-doc", { method: "POST", body: fd });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const entry = await resp.json();
-    // Replace placeholder with real entry.
     const idx = fileRegistry.indexOf(placeholder);
     if (idx !== -1) fileRegistry.splice(idx, 1, entry);
     else fileRegistry.push(entry);
@@ -967,6 +959,14 @@ async function handleDocFileInput(input) {
     renderFilesBar();
     alert(`Upload lỗi: ${err.message}`);
   }
+}
+
+async function handleDocFileInput(input) {
+  const file = input.files?.[0];
+  input.value = "";
+  if (!file) return;
+  if (file.type.startsWith("image/")) { handleImageFile(file); return; }
+  await handleDocFile(file);
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
