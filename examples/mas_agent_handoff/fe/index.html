@@ -89,7 +89,7 @@
     border-radius: 7px;
     overflow: hidden;
     border: 1px solid var(--border);
-    font-size: 11px; font-family: var(--mono);
+    font-size: 13px; font-family: var(--mono);
   }
   .tool-item.loading .tool-header {
     color: #b45309;
@@ -149,11 +149,23 @@
   }
   .tool-item.has-result .tool-chevron { display: inline; }
   .tool-item.expanded .tool-chevron { transform: rotate(180deg); }
-  @keyframes word-in {
-    from { opacity: 0; transform: translateY(3px); }
-    to   { opacity: 1; transform: translateY(0); }
+  @keyframes text-shimmer {
+    0%   { background-position: -200% center; }
+    100% { background-position:  200% center; }
   }
-  .tool-label-word { display: inline; animation: word-in .22s ease both; }
+  .tool-item.loading .tool-label {
+    background: linear-gradient(
+      90deg,
+      #c2410c 0%, #c2410c 30%,
+      #f97316 50%,
+      #c2410c 70%, #c2410c 100%
+    );
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: text-shimmer 1.5s ease-in-out infinite;
+  }
 
   .tool-body {
     display: none;
@@ -566,15 +578,8 @@ function getTextBlock(bubble) {
   return last;
 }
 
-function animateWords(el, text) {
-  el.innerHTML = "";
-  text.split(" ").forEach((word, i) => {
-    const span = document.createElement("span");
-    span.className = "tool-label-word";
-    span.style.animationDelay = `${i * 55}ms`;
-    span.textContent = word + (i < text.split(" ").length - 1 ? " " : "");
-    el.appendChild(span);
-  });
+function animateLabel(el, text) {
+  el.textContent = text;
 }
 
 function addToolChip(bubble, name, query, fileId, task, intent) {
@@ -610,7 +615,7 @@ function addToolChip(bubble, name, query, fileId, task, intent) {
   const label = document.createElement("span");
   label.className = "tool-label";
   if (task) {
-    animateWords(label, task);
+    animateLabel(label, task);
   } else {
     let chipLabel;
     if (name === "web_search" && query) {
