@@ -293,7 +293,7 @@
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* Input */
-  .input-area { padding: 12px 20px 20px; flex-shrink: 0; display: flex; gap: 10px; }
+  .input-area { padding: 12px 20px 20px; flex-shrink: 0; display: flex; gap: 10px; position: relative; }
   .input-area input {
     flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
     color: var(--text); padding: 10px 16px; font-size: 14px; font-family: var(--font);
@@ -313,8 +313,38 @@
   }
   .attach-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-  /* File card grid — used in files-bar and user bubble attachments */
-  .files-bar { padding: 8px 20px 0; flex-shrink: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+  /* Files panel (floating above input) */
+  .files-panel-btn {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    border-radius: var(--radius); padding: 10px 11px; font-size: 15px; cursor: pointer;
+    transition: border-color .15s, color .15s; display: none; align-items: center; gap: 4px;
+    flex-shrink: 0;
+  }
+  .files-panel-btn.has-files { display: flex; border-color: #3b82f6; color: #3b82f6; }
+  .files-panel-count {
+    font-size: 9px; font-weight: 700; background: #3b82f6; color: #fff;
+    border-radius: 8px; padding: 1px 5px; min-width: 14px; text-align: center;
+  }
+
+  .files-panel {
+    position: absolute; bottom: calc(100% + 6px); right: 0;
+    width: 360px; max-height: 340px; overflow-y: auto;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,.15); padding: 12px;
+    display: none; z-index: 200;
+  }
+  .files-panel.open { display: block; }
+  .files-panel-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 10px; font-size: 12px; font-weight: 600; color: var(--text);
+  }
+  .files-panel-close {
+    background: none; border: none; cursor: pointer; color: var(--muted); font-size: 14px; padding: 0;
+  }
+  .files-panel-close:hover { color: #ef4444; }
+
+  /* File card grid — used inside files-panel and user bubble attachments */
+  .files-bar { display: flex; flex-wrap: wrap; gap: 8px; }
   .msg-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; justify-content: flex-end; }
 
   .file-card {
@@ -468,9 +498,6 @@
     <div id="ctx-body"></div>
   </div>
 
-  <!-- Attached documents bar (persists across turns) -->
-  <div class="files-bar" id="files-bar" style="display:none"></div>
-
   <div class="img-preview-bar" id="img-preview-bar" style="display:none">
     <div class="img-thumb-wrap" id="img-thumb-wrap" onclick="openLightbox()" title="Xem toàn màn hình">
       <img id="img-preview-thumb" src="" alt="preview" />
@@ -496,7 +523,19 @@
   </div>
 
   <form class="input-area" id="form" autocomplete="off">
+    <!-- Files panel (floating above) -->
+    <div class="files-panel" id="files-panel">
+      <div class="files-panel-header">
+        <span>📎 Files đính kèm</span>
+        <button type="button" class="files-panel-close" onclick="toggleFilesPanel()">✕</button>
+      </div>
+      <div class="files-bar" id="files-bar"></div>
+    </div>
+
     <input id="input" placeholder="Hỏi gì đó… hoặc dán / kéo ảnh vào đây" />
+    <button type="button" id="files-panel-btn" class="files-panel-btn" onclick="toggleFilesPanel()" title="Files đính kèm">
+      🗂<span id="files-panel-count" class="files-panel-count"></span>
+    </button>
     <button type="button" class="attach-btn" title="Đính kèm file (xlsx, pdf, docx, csv, ảnh)"
             onclick="document.getElementById('doc-file-input').click()">📎</button>
     <input type="file" id="doc-file-input" accept=".xlsx,.xls,.pdf,.docx,.csv,.txt,.png,.jpg,.jpeg"
@@ -931,6 +970,7 @@ ctxBar.init();
 // Raw bytes live on the server after /upload — never as a base64 string in JS.
 let pendingImage   = null; // { id: string|null, mime, previewUrl, name }
 let pendingUploads = 0;   // count of in-flight uploads — button disabled while > 0
+let sentFileIds    = new Set(); // IDs already shown in a user bubble
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
@@ -974,7 +1014,8 @@ async function handleImageFile(file) {
 
   // Show preview bar for the last-started upload
   document.getElementById("img-preview-thumb").src = previewUrl;
-  document.getElementById("img-preview-label").textContent = `${file.type} · ${kb} KB · đang upload…`;
+  document.getElementById("img-preview-label").style.color = "";  // reset error color
+  document.getElementById("img-preview-label").textContent = `${file.name} · đang upload…`;
   document.getElementById("img-thumb-overlay").style.display = "flex";
   document.getElementById("img-progress-track").style.display = "block";
   document.getElementById("img-progress-fill").style.width = "0%";
@@ -989,10 +1030,16 @@ async function handleImageFile(file) {
         document.getElementById("img-progress-fill").style.width = `${Math.round(pct * 100)}%`;
     });
   } catch (err) {
-    alert(`Upload lỗi: ${err.message}`);
     URL.revokeObjectURL(previewUrl);
     pendingUploads--;
-    if (pendingUploads === 0) $btn.disabled = false;
+    if (pendingUploads === 0) {
+      $btn.disabled = false;
+      // Show error state in preview bar
+      document.getElementById("img-thumb-overlay").style.display = "none";
+      document.getElementById("img-progress-track").style.display = "none";
+      document.getElementById("img-preview-label").style.color = "#dc2626";
+      document.getElementById("img-preview-label").textContent = `Upload thất bại: ${err.message}`;
+    }
     return;
   }
 
@@ -1001,9 +1048,12 @@ async function handleImageFile(file) {
   pendingUploads--;
   if (pendingUploads === 0) {
     $btn.disabled = false;
-    // All uploads done — hide the single-image progress bar (files are shown as cards below)
-    document.getElementById("img-preview-bar").style.display = "none";
-    pendingImage = null;
+    // All done — show success state; bar stays visible until user sends (cleared by clearPendingImage)
+    document.getElementById("img-progress-fill").style.width = "100%";
+    document.getElementById("img-thumb-overlay").style.display = "none";
+    document.getElementById("img-progress-track").style.display = "none";
+    document.getElementById("img-preview-label").textContent = `${file.name} · ${kb} KB`;
+    document.getElementById("img-server-badge").style.display = "inline";
   }
 
   // Add to files bar immediately so status is visible before sending
@@ -1035,6 +1085,16 @@ function closeLightbox() {
   document.getElementById("lightbox").style.display = "none";
   document.getElementById("lightbox-img").src = "";
 }
+
+function toggleFilesPanel() {
+  document.getElementById("files-panel").classList.toggle("open");
+}
+document.addEventListener("click", e => {
+  const panel = document.getElementById("files-panel");
+  const btn   = document.getElementById("files-panel-btn");
+  if (panel?.classList.contains("open") && !panel.contains(e.target) && !btn?.contains(e.target))
+    panel.classList.remove("open");
+});
 document.addEventListener("keydown", e => { if (e.key === "Escape") closeLightbox(); });
 
 // Paste from clipboard (screenshot or copied image)
@@ -1089,10 +1149,17 @@ function buildFileCard(f, idx, removable) {
 }
 
 function renderFilesBar() {
-  const bar = document.getElementById("files-bar");
-  if (fileRegistry.length === 0) { bar.style.display = "none"; return; }
-  bar.style.display = "flex";
+  const bar   = document.getElementById("files-bar");
+  const btn   = document.getElementById("files-panel-btn");
+  const count = document.getElementById("files-panel-count");
   bar.innerHTML = fileRegistry.map((f, i) => buildFileCard(f, i, true)).join("");
+  if (fileRegistry.length === 0) {
+    btn.classList.remove("has-files");
+    document.getElementById("files-panel").classList.remove("open");
+  } else {
+    btn.classList.add("has-files");
+    count.textContent = fileRegistry.length;
+  }
 }
 
 function removeFileAt(i) {
@@ -1149,7 +1216,9 @@ async function sendMessage(message) {
   $empty && $empty.remove();
   $aiLogo.remove(); // clear logo from previous turn
   ctxBar.newTurn();
-  const fileSnapshot = fileRegistry.map(f => ({...f}));  // snapshot before clearPendingImage
+  // Only show files new to this turn in the user bubble
+  const newFiles     = fileRegistry.filter(f => !sentFileIds.has(f.id));
+  const fileSnapshot = newFiles.map(f => ({...f}));
   addUserBubble(message, fileSnapshot);
   showFlow("Supervisor đang phân tích...");
 
@@ -1399,7 +1468,8 @@ async function sendMessage(message) {
     history.push({ role: "user", content: message });
     for (const t of turns) history.push({ role: "model", content: t.content, name: t.agent });
 
-    // fileRegistry already has all uploaded files (added in handleImageFile/handleDocFile).
+    // Mark files shown in this turn so future turns don't re-show them
+    newFiles.forEach(f => sentFileIds.add(f.id));
 
   } catch (err) {
     hideFlow();
