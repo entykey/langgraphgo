@@ -218,7 +218,7 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 				sizeKB := len(imageB64) * 3 / 4 / 1024
 				fileRegistry = append(fileRegistry, FileEntry{
 					ID:     req.ImageID,
-					Name:   "image_" + req.ImageID[:8],
+					Name:   "Ảnh đính kèm",
 					Mime:   imageMime,
 					SizeKB: sizeKB,
 					Status: "available",
@@ -353,7 +353,15 @@ func staticHandler() http.Handler {
 	for _, p := range candidates {
 		if info, err := os.Stat(p); err == nil && info.IsDir() {
 			fmt.Printf("[mas_agent_handoff] serving static files from %s\n", p)
-			return http.FileServer(http.Dir(p))
+			fs := http.FileServer(http.Dir(p))
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Prevent browser caching of HTML so code changes are always picked up.
+				if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+					w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+					w.Header().Set("Pragma", "no-cache")
+				}
+				fs.ServeHTTP(w, r)
+			})
 		}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -86,7 +86,7 @@ Brief mờ nhạt = kết quả chung chung = user frustrated.`,
 				brief.Task, brief.UserIntent)
 			msgs := []Message{{Role: "user", Content: userMsg}}
 
-			text, _, _, _, err := gemini.StreamChatWithImage(
+			text, promptTok, completionTok, _, err := gemini.StreamChatWithImage(
 				ctx, systemPrompt, msgs, b64, mime,
 				func(tok string) {
 					emit(eventCh, "tool_stream", map[string]string{"name": "read_image", "text": tok})
@@ -95,7 +95,9 @@ Brief mờ nhạt = kết quả chung chung = user frustrated.`,
 			if err != nil {
 				return "Error calling Vision: " + err.Error()
 			}
-
+			emit(eventCh, "usage", map[string]any{
+				"agent": "vision_agent", "prompt_tok": promptTok, "completion_tok": completionTok,
+			})
 			return text
 		},
 	}

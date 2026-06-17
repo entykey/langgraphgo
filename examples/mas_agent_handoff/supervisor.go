@@ -230,12 +230,19 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 				args = map[string]any{}
 			}
 
+			brief := parseBrief(args)
 			toolEvt := map[string]string{"name": tc.Function.Name}
 			if q, _ := args["query"].(string); q != "" {
 				toolEvt["query"] = q
 			}
 			if fid, _ := args["file_id"].(string); fid != "" {
 				toolEvt["file_id"] = fid
+			}
+			if brief.Task != "" {
+				toolEvt["task"] = brief.Task
+			}
+			if brief.UserIntent != "" {
+				toolEvt["intent"] = brief.UserIntent
 			}
 			emit(state.EventCh, "tool_call", toolEvt)
 			fmt.Printf("[supervisor] tool: %s(%s)\n", tc.Function.Name, truncate(tc.Function.Arguments, 120))

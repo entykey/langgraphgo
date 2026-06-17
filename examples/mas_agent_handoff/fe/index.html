@@ -126,6 +126,21 @@
     flex-shrink: 0;
   }
   .tool-item.has-result .tool-header:hover { background: rgba(21,128,61,.12); }
+  .tool-item.error .tool-header {
+    cursor: pointer;
+    color: #dc2626;
+    background: rgba(220,38,38,.07);
+  }
+  .tool-item.error .tool-header::before {
+    content: "✕";
+    color: #dc2626;
+    font-size: 10px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .tool-item.error .tool-header:hover { background: rgba(220,38,38,.12); }
+  .tool-item.error .tool-chevron { display: inline; }
+  .tool-item.error .tool-result { color: #b91c1c; }
   .tool-label { flex: 1; }
   .tool-chevron {
     opacity: .5; font-size: 9px;
@@ -134,18 +149,42 @@
   }
   .tool-item.has-result .tool-chevron { display: inline; }
   .tool-item.expanded .tool-chevron { transform: rotate(180deg); }
+  @keyframes word-in {
+    from { opacity: 0; transform: translateY(3px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .tool-label-word { display: inline; animation: word-in .22s ease both; }
+
   .tool-body {
     display: none;
-    padding: 8px 10px;
-    background: var(--surface2);
+    flex-direction: column;
     border-top: 1px solid var(--border);
-    font-size: 10.5px; color: #4b5563;
-    white-space: pre-wrap; word-break: break-word;
-    max-height: 280px; overflow-y: auto;
-    line-height: 1.5;
+    overflow: hidden;
   }
   .tool-item.expanded .tool-body,
-  .tool-item.loading.streaming .tool-body { display: block; }
+  .tool-item.loading.streaming .tool-body { display: flex; }
+
+  .tool-meta {
+    display: none;
+    padding: 5px 10px;
+    background: rgba(249,115,22,.04);
+    border-bottom: 1px solid var(--border);
+    font-size: 10px; color: #6b7280;
+    grid-template-columns: auto 1fr; gap: 1px 8px;
+    line-height: 1.4;
+  }
+  .tool-item.expanded .tool-meta { display: grid; }
+  .tool-meta dt { color: #9ca3af; font-size: 9px; text-transform: uppercase; letter-spacing: .3px; align-self: start; padding-top: 1px; }
+  .tool-meta dd { color: #4b5563; margin: 0; word-break: break-word; }
+
+  .tool-result {
+    padding: 8px 10px;
+    background: var(--surface2);
+    font-size: 10.5px; color: #4b5563;
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 240px; overflow-y: auto;
+    line-height: 1.5; flex: 1;
+  }
 
   /* Markdown styles (apply inside .content-text) */
   .content-text p  { margin: 0 0 .6em; }
@@ -265,6 +304,7 @@
   }
   .file-chip.uploading { opacity: .6; }
   .file-chip.read { border-color: #15803d; color: #15803d; }
+  .file-chip.available { border-color: #2563eb; color: #2563eb; }
   .file-chip .rm-file {
     background: none; border: none; cursor: pointer; color: var(--muted);
     padding: 0 2px; font-size: 10px; line-height: 1; transition: color .15s;
@@ -426,6 +466,23 @@
 <script>
 marked.setOptions({ breaks: true, gfm: true });
 
+// Drag & drop — registered first so later init errors cannot prevent it.
+// handleImageFile / handleDocFile are hoisted function declarations, safe to call here.
+;(function() {
+  const layout = document.querySelector(".layout");
+  if (!layout) return;
+  layout.addEventListener("dragover",  e => { e.preventDefault(); layout.classList.add("drag-over"); });
+  layout.addEventListener("dragleave", () => layout.classList.remove("drag-over"));
+  layout.addEventListener("drop", e => {
+    e.preventDefault();
+    layout.classList.remove("drag-over");
+    for (const file of Array.from(e.dataTransfer?.files || [])) {
+      if (file.type.startsWith("image/")) handleImageFile(file);
+      else handleDocFile(file);
+    }
+  });
+}());
+
 // sessionId is sourced from the server so every `go run .` creates a new Langfuse session.
 // No localStorage — stale sessions no longer accumulate across server restarts.
 let sessionId = "";
@@ -509,7 +566,18 @@ function getTextBlock(bubble) {
   return last;
 }
 
-function addToolChip(bubble, name, query, fileId) {
+function animateWords(el, text) {
+  el.innerHTML = "";
+  text.split(" ").forEach((word, i) => {
+    const span = document.createElement("span");
+    span.className = "tool-label-word";
+    span.style.animationDelay = `${i * 55}ms`;
+    span.textContent = word + (i < text.split(" ").length - 1 ? " " : "");
+    el.appendChild(span);
+  });
+}
+
+function addToolChip(bubble, name, query, fileId, task, intent) {
   if (!bubble) return;
   hideInfobar(bubble);
   const content = bubble.querySelector(".bubble-content");
@@ -533,23 +601,29 @@ function addToolChip(bubble, name, query, fileId) {
   item.dataset.toolName = name;
   if (query)  item.dataset.query  = query;
   if (fileId) item.dataset.fileId = fileId;
+  if (task)   item.dataset.task   = task;
+  if (intent) item.dataset.intent = intent;
 
   const header = document.createElement("div");
   header.className = "tool-header";
 
   const label = document.createElement("span");
   label.className = "tool-label";
-  let chipLabel;
-  if (name === "web_search" && query) {
-    chipLabel = `🌐 "${query}"`;
-  } else if ((name === "read_image" || name === "read_file") && fileId) {
-    const entry = fileRegistry.find(f => f.id === fileId);
-    const fname = entry?.name || fileId.slice(0, 8);
-    chipLabel = name === "read_image" ? `🖼️ ${fname}` : `📄 ${fname}`;
+  if (task) {
+    animateWords(label, task);
   } else {
-    chipLabel = `🔧 ${name}`;
+    let chipLabel;
+    if (name === "web_search" && query) {
+      chipLabel = `🌐 "${query}"`;
+    } else if ((name === "read_image" || name === "read_file") && fileId) {
+      const entry = fileRegistry.find(f => f.id === fileId);
+      const fname = entry?.name || (name === "read_image" ? "ảnh" : "file");
+      chipLabel = name === "read_image" ? `🖼️ ${fname}` : `📄 ${fname}`;
+    } else {
+      chipLabel = `🔧 ${name}`;
+    }
+    label.textContent = chipLabel;
   }
-  label.textContent = chipLabel;
 
   const chevron = document.createElement("span");
   chevron.className = "tool-chevron";
@@ -560,6 +634,32 @@ function addToolChip(bubble, name, query, fileId) {
 
   const body = document.createElement("div");
   body.className = "tool-body";
+
+  // Meta section (task / intent shown when expanded)
+  if (task || intent) {
+    const meta = document.createElement("dl");
+    meta.className = "tool-meta";
+    if (name) {
+      const dt = document.createElement("dt"); dt.textContent = "tool";
+      const dd = document.createElement("dd"); dd.textContent = name;
+      meta.appendChild(dt); meta.appendChild(dd);
+    }
+    if (task) {
+      const dt = document.createElement("dt"); dt.textContent = "task";
+      const dd = document.createElement("dd"); dd.textContent = task;
+      meta.appendChild(dt); meta.appendChild(dd);
+    }
+    if (intent) {
+      const dt = document.createElement("dt"); dt.textContent = "intent";
+      const dd = document.createElement("dd"); dd.textContent = intent;
+      meta.appendChild(dt); meta.appendChild(dd);
+    }
+    body.appendChild(meta);
+  }
+
+  const resultDiv = document.createElement("div");
+  resultDiv.className = "tool-result";
+  body.appendChild(resultDiv);
 
   header.addEventListener("click", () => {
     if (item.classList.contains("has-result")) item.classList.toggle("expanded");
@@ -872,6 +972,12 @@ async function handleImageFile(file) {
   document.getElementById("img-preview-label").textContent = `${file.type} · ${kb} KB`;
   document.getElementById("img-server-badge").style.display = "inline";
   $btn.disabled = false;
+
+  // Add to files bar immediately so status is visible before sending
+  if (!fileRegistry.some(f => f.id === imageId)) {
+    fileRegistry.push({ id: imageId, name: file.name, mime: file.type, size_kb: kb, status: "available" });
+    renderFilesBar();
+  }
 }
 
 function clearPendingImage() {
@@ -908,18 +1014,6 @@ document.addEventListener("paste", e => {
   }
 });
 
-// Drag & drop onto the layout
-const $layout = document.querySelector(".layout");
-$layout.addEventListener("dragover",  e => { e.preventDefault(); $layout.classList.add("drag-over"); });
-$layout.addEventListener("dragleave", e => { $layout.classList.remove("drag-over"); });
-$layout.addEventListener("drop", e => {
-  e.preventDefault();
-  $layout.classList.remove("drag-over");
-  const file = e.dataTransfer?.files[0];
-  if (!file) return;
-  if (file.type.startsWith("image/")) handleImageFile(file);
-  else handleDocFile(file);
-});
 
 // ── Document file upload ──────────────────────────────────────────────────────
 const FILE_ICON = mime =>
@@ -935,11 +1029,15 @@ function renderFilesBar() {
   if (fileRegistry.length === 0) { bar.style.display = "none"; return; }
   bar.style.display = "flex";
   bar.innerHTML = fileRegistry.map((f, i) => {
-    const statusClass = f.status === "read" ? " read" : f.status === "uploading" ? " uploading" : "";
-    const readBadge   = f.status === "read" ? " ✓" : "";
-    return `<div class="file-chip${statusClass}" title="${escHtml(f.name)} — ${f.size_kb}KB">
-      ${FILE_ICON(f.mime || '')} ${escHtml(f.name)}${readBadge}
-      <button class="rm-file" type="button" onclick="removeFileAt(${i})" title="Xóa">✕</button>
+    const statusClass = f.status === "read" ? " read"
+                      : f.status === "uploading" ? " uploading"
+                      : f.status === "available" ? " available" : "";
+    const badge = f.status === "read" ? " ✓" : f.status === "available" ? " ●" : "";
+    const isImg = (f.mime || "").startsWith("image/");
+    const clickAttr = isImg && f.id ? ` onclick="openLightbox('/image/${f.id}')" style="cursor:zoom-in"` : "";
+    return `<div class="file-chip${statusClass}" title="${escHtml(f.name)} — ${f.size_kb}KB${isImg ? ' · click to preview' : ''}"${clickAttr}>
+      ${FILE_ICON(f.mime || '')} ${escHtml(f.name)}${badge}
+      <button class="rm-file" type="button" onclick="event.stopPropagation();removeFileAt(${i})" title="Xóa">✕</button>
     </div>`;
   }).join("");
 }
@@ -1100,7 +1198,9 @@ async function sendMessage(message) {
           case "tool_call": {
             ensureBubble();
             let infoText;
-            if (data.name === "web_search" && data.query) {
+            if (data.task) {
+              infoText = `⚙️ ${data.task}...`;
+            } else if (data.name === "web_search" && data.query) {
               infoText = `🌐 Đang tìm kiếm: "${data.query}"...`;
             } else if (data.name === "read_image" && data.file_id) {
               const e = fileRegistry.find(f => f.id === data.file_id);
@@ -1112,7 +1212,7 @@ async function sendMessage(message) {
               infoText = `🔧 ${data.name}()...`;
             }
             setInfobar(curBubble, infoText);
-            addToolChip(curBubble, data.name, data.query, data.file_id);
+            addToolChip(curBubble, data.name, data.query, data.file_id, data.task, data.intent);
             break;
           }
 
@@ -1146,8 +1246,8 @@ async function sendMessage(message) {
               const item = items[0]; // FIFO
               if (item) {
                 item.classList.add("streaming");
-                const body = item.querySelector(".tool-body");
-                if (body) { body.textContent += data.text || ""; scrollBottom(); }
+                const result = item.querySelector(".tool-result") || item.querySelector(".tool-body");
+                if (result) { result.textContent += data.text || ""; scrollBottom(); }
               }
             }
             break;
@@ -1158,10 +1258,12 @@ async function sendMessage(message) {
               const items = curBubble.querySelectorAll(`.tool-item[data-tool-name="${data.name}"].loading`);
               const item = items[0]; // FIFO
               if (item) {
+                const resultText = data.result || "";
+                const isError = resultText.startsWith("Error") || resultText.startsWith("[TOOL ERROR]");
                 item.classList.remove("loading", "streaming");
-                item.classList.add("has-result");
-                const body = item.querySelector(".tool-body");
-                if (body) body.textContent = data.result || "";
+                item.classList.add(isError ? "error" : "has-result");
+                const result = item.querySelector(".tool-result") || item.querySelector(".tool-body");
+                if (result) result.textContent = resultText;
                 // Update file registry status when a file tool completes
                 const fid = item.dataset.fileId;
                 if (fid) {
