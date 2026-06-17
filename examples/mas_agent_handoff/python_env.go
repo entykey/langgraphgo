@@ -55,7 +55,9 @@ func initPythonEnv() {
 		fmt.Printf("[python] WARNING: pip upgrade failed: %v\n%s\n", err, out)
 	}
 
-	packages := []string{"openpyxl", "python-docx", "pdfminer.six"}
+	// xlrd 1.2.0: last version that still reads both .xls AND .xlsx.
+	// Newer xlrd dropped xlsx support; we use it as openpyxl fallback.
+	packages := []string{"openpyxl", "xlrd==1.2.0", "python-docx", "pdfminer.six"}
 	args := append([]string{"install", "--quiet"}, packages...)
 	if out, err := exec.Command(pipBin, args...).CombinedOutput(); err != nil {
 		fmt.Printf("[python] WARNING: pip install failed: %v\n%s\n", err, out)

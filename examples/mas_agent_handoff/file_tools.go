@@ -256,24 +256,49 @@ func detectMimeByContent(data []byte) string {
 // ── Python exec helpers ───────────────────────────────────────────────────────
 
 func execReadXLSX(path string, brief TaskBrief) string {
-	script := fmt.Sprintf(`# Task: %s
-# Output format: %s
-import openpyxl, sys
+	script := fmt.Sprintf(`import sys
 
-wb = openpyxl.load_workbook(%q, read_only=True, data_only=True)
-print(f"Workbook: {len(wb.sheetnames)} sheet(s): {wb.sheetnames}")
+path = %q
+errors = []
 
-for sheet_name in wb.sheetnames:
-    ws = wb[sheet_name]
-    print(f"\n## Sheet: {sheet_name}")
-    row_count = 0
-    for row in ws.iter_rows(values_only=True):
-        if any(c is not None for c in row):
-            cells = [str(c) if c is not None else "" for c in row]
-            print("\t".join(cells))
-            row_count += 1
-    print(f"[{row_count} rows]")
-`, brief.Task, brief.OutputFormat, path)
+# Method 1: openpyxl (modern xlsx/xlsm, including digitally signed files)
+try:
+    import openpyxl
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    names = wb.sheetnames
+    print(f"Sheets ({len(names)}): {names}")
+    for sn in names:
+        ws = wb[sn]
+        print(f"\n## Sheet: {sn}")
+        count = 0
+        for row in ws.iter_rows(values_only=True):
+            if any(c is not None for c in row):
+                print("\t".join(str(c) if c is not None else "" for c in row))
+                count += 1
+        print(f"[{count} rows]")
+    sys.exit(0)
+except Exception as e:
+    errors.append(f"openpyxl: {e}")
+
+# Method 2: xlrd 1.2.0 (legacy .xls and non-standard .xlsx e.g. Vietnamese invoices)
+try:
+    import xlrd
+    wb = xlrd.open_workbook(path)
+    names = wb.sheet_names()
+    print(f"Sheets ({len(names)}): {names}")
+    for sn in names:
+        ws = wb.sheet_by_name(sn)
+        print(f"\n## Sheet: {sn}")
+        for i in range(ws.nrows):
+            print("\t".join(str(v) for v in ws.row_values(i)))
+        print(f"[{ws.nrows} rows]")
+    sys.exit(0)
+except Exception as e:
+    errors.append(f"xlrd: {e}")
+
+print("; ".join(errors), file=sys.stderr)
+sys.exit(1)
+`, path)
 	return runPythonScript(script, 30)
 }
 
@@ -346,6 +371,8 @@ func runPythonScript(script string, timeoutSec int) string {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, agentPythonBin, f.Name())
+	// Force UTF-8 I/O so Vietnamese characters don't crash on Windows (cp1252 default).
+	cmd.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

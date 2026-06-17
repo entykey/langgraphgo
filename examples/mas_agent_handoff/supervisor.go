@@ -103,8 +103,10 @@ func supervisorNode(backend SupervisorBackend, gemini *GeminiClient) func(contex
 			fmt.Printf("[supervisor] routing error: %v — fallback to self\n", err)
 			globalLF.GenerationEnd(routeGenID, state.TraceID, map[string]any{"error": err.Error()}, 0, 0, time.Time{})
 			globalLF.SpanEnd(spanID, state.TraceID, map[string]any{"route": "self", "error": err.Error()})
-			state.Next = "self"
-			emit(state.EventCh, "routing", map[string]string{"decision": "self", "reasoning": "routing error"})
+			errMsg := fmt.Sprintf("⚠️ Supervisor không khả dụng: %v\n\nVui lòng thử lại sau.", err)
+			emit(state.EventCh, "token", map[string]string{"text": errMsg})
+			state.Messages = append(state.Messages, Message{Role: "model", Content: errMsg, Name: "supervisor"})
+			state.Next = "FINISH"
 			return state, nil
 		}
 		elapsed := time.Since(t0)
