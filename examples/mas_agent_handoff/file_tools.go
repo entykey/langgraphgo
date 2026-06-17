@@ -11,6 +11,22 @@ import (
 	"time"
 )
 
+// parseBrief extracts a TaskBrief from tool args.
+// DeepSeek sometimes passes task_brief as a JSON-encoded string instead of an object —
+// this helper handles both forms so the tool never gets an empty brief.
+func parseBrief(args map[string]any) TaskBrief {
+	var brief TaskBrief
+	switch v := args["task_brief"].(type) {
+	case map[string]any:
+		b, _ := json.Marshal(v)
+		json.Unmarshal(b, &brief) //nolint:errcheck
+	case string:
+		// LLM double-encoded the object as a JSON string — decode it.
+		json.Unmarshal([]byte(v), &brief) //nolint:errcheck
+	}
+	return brief
+}
+
 // makeReadImageTool returns a ToolDef that calls Gemini Vision with a TaskBrief.
 // Supervisor calls this instead of routing to vision_agent node.
 // Pattern mirrors makeWebSearchTool: tool calls Gemini, returns string for supervisor to synthesise.
@@ -53,13 +69,9 @@ Brief mờ nhạt = kết quả chung chung = user frustrated.`,
 				return "Error: file_id required"
 			}
 
-			var brief TaskBrief
-			if briefRaw, ok := args["task_brief"].(map[string]any); ok {
-				briefJSON, _ := json.Marshal(briefRaw)
-				json.Unmarshal(briefJSON, &brief) //nolint:errcheck
-			}
+			brief := parseBrief(args)
 			if brief.Task == "" {
-				return "Error: task_brief.task is required"
+				return "Error: task_brief.task is required — provide a detailed task description"
 			}
 
 			fmt.Printf("[read_image] file_id=%s task=%s\n", fileID, truncate(brief.Task, 80))
@@ -169,20 +181,14 @@ Dùng khi user hỏi về dữ liệu trong file, cần extract bảng/text, ho�
 				return "Error: file_id required"
 			}
 
-			var brief TaskBrief
-			if briefRaw, ok := args["task_brief"].(map[string]any); ok {
-				briefJSON, _ := json.Marshal(briefRaw)
-				json.Unmarshal(briefJSON, &brief) //nolint:errcheck
-			}
-
+			brief := parseBrief(args)
 			fmt.Printf("[read_file] file_id=%s task=%s\n", fileID, truncate(brief.Task, 80))
-			emit(eventCh, "tool_call", map[string]string{
-				"name":    "read_file",
-				"file_id": fileID,
-				"task":    brief.Task,
-			})
 
-			data, err := fetchDocument(fileID)
+			// supervisor already emitted tool_call before invoking this Fn.
+			// Emit tool_stream progress token so the UI chip shows activity.
+			emit(eventCh, "tool_stream", map[string]string{"name": "read_file", "text": ""})
+
+			data, storedMime, err := fetchDocument(fileID)
 			if err != nil {
 				return "Error fetching file: " + err.Error()
 			}
@@ -195,8 +201,14 @@ Dùng khi user hỏi về dữ liệu trong file, cần extract bảng/text, ho�
 			tmpFile.Write(data) //nolint:errcheck
 			tmpFile.Close()
 
-			// Detect MIME from content bytes; fall back to context if ambiguous.
-			mime := detectMimeByContent(data)
+			// Use MIME from upload — far more reliable than magic-byte detection for
+			// ZIP-based Office formats (xlsx and docx both start with PK bytes).
+			mime := storedMime
+			if mime == "" || mime == "application/octet-stream" {
+				mime = detectMimeByContent(data)
+			}
+
+			fmt.Printf("[read_file] dispatch mime=%s path=%s\n", mime, tmpFile.Name())
 
 			var result string
 			switch {
@@ -209,6 +221,7 @@ Dùng khi user hỏi về dữ liệu trong file, cần extract bảng/text, ho�
 			case mime == "text/csv":
 				result = execReadCSV(tmpFile.Name(), brief)
 			default:
+				// Plain text fallback
 				result = string(data)
 				if len(result) > 8000 {
 					result = result[:8000] + "\n...[truncated]"
@@ -224,13 +237,13 @@ Dùng khi user hỏi về dữ liệu trong file, cần extract bảng/text, ho�
 	}
 }
 
-// detectMimeByContent uses magic bytes to detect MIME — simpler than a full library.
-// MIME from the upload (detectMimeByExt) is preferred; this is a safety fallback.
+// detectMimeByContent uses magic bytes — intentionally simple.
+// Caller should prefer storedMime from upload when available.
 func detectMimeByContent(data []byte) string {
 	if len(data) < 4 {
 		return "application/octet-stream"
 	}
-	// ZIP-based (xlsx, docx) — distinguish via caller's stored MIME, not here.
+	// ZIP-based (xlsx, docx) — prefer storedMime; return zip as generic fallback.
 	if data[0] == 'P' && data[1] == 'K' {
 		return "application/zip"
 	}
@@ -317,9 +330,9 @@ if len(rows) > 100:
 	return runPythonScript(script, 15)
 }
 
-// runPythonScript writes the script to a temp file, executes it with agentPythonBin,
+// runPythonScript writes the script to a temp file, executes it with agentPythonBin (venv),
 // and returns stdout. Stderr is returned with a "ScriptError:" prefix so the supervisor
-// can reason about the failure instead of hallucinating a result.
+// can reason about the failure and potentially retry differently.
 func runPythonScript(script string, timeoutSec int) string {
 	f, err := os.CreateTemp("", "agent_*.py")
 	if err != nil {
