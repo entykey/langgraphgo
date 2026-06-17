@@ -383,30 +383,32 @@
   }
   .card-rm:hover { background: rgba(220,38,38,.85); }
 
-  /* Image preview strip above input */
+  /* Upload preview bar — multi-image card grid above input */
   .img-preview-bar {
-    padding: 8px 20px 0; flex-shrink: 0; display: flex; align-items: center; gap: 10px;
+    padding: 8px 20px 0; flex-shrink: 0; display: flex; flex-wrap: wrap; gap: 8px;
   }
-  .img-thumb-wrap { position: relative; cursor: zoom-in; flex-shrink: 0; }
-  .img-preview-bar img { max-height: 72px; border-radius: 8px; border: 1px solid var(--border); display: block; }
-  .img-thumb-overlay {
-    position: absolute; inset: 0; background: rgba(0,0,0,.55); border-radius: 8px;
-    display: flex; align-items: center; justify-content: center; pointer-events: none;
+  /* Progress overlay on each upload card */
+  .upload-overlay {
+    position: absolute; inset: 0 0 1.65em 0;
+    background: rgba(0,0,0,.48);
+    display: flex; align-items: flex-end; padding: 0 8px 6px;
   }
-  .img-preview-info { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 0; }
-  .img-label { font-size: 11px; color: var(--muted); }
-  .img-progress-track { height: 3px; background: var(--surface2); border-radius: 2px; overflow: hidden; width: 100%; max-width: 220px; }
-  .img-progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width .08s linear; width: 0%; }
-  .img-server-badge {
-    font-size: 10px; color: #059669; font-family: var(--mono); cursor: zoom-in;
-    letter-spacing: -.2px; white-space: nowrap;
+  .upload-progress { flex: 1; height: 3px; background: rgba(255,255,255,.25); border-radius: 2px; overflow: hidden; }
+  .upload-fill { height: 100%; background: #fff; border-radius: 2px; transition: width .08s linear; width: 0%; }
+  .upload-err-overlay {
+    position: absolute; inset: 0 0 1.65em 0;
+    background: rgba(185,28,28,.65);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; color: #fff; padding: 4px; text-align: center; font-weight: 600;
   }
-  .img-server-badge:hover { text-decoration: underline; }
-  .img-preview-bar .remove-btn {
-    background: none; border: 1px solid var(--border); color: var(--muted);
-    border-radius: 6px; padding: 2px 8px; cursor: pointer; font-size: 12px; flex-shrink: 0;
+  .file-card.upload-success { border-color: #16a34a; }
+  .file-card.upload-error   { border-color: #dc2626; }
+  .upload-badge {
+    position: absolute; top: 3px; right: 3px; width: 16px; height: 16px; border-radius: 50%;
+    font-size: 9px; font-weight: 700; display: flex; align-items: center; justify-content: center;
   }
-  .img-preview-bar .remove-btn:hover { border-color: #ef4444; color: #ef4444; }
+  .upload-badge.ok  { background: #16a34a; color: #fff; }
+  .upload-badge.err { background: #dc2626; color: #fff; }
 
   /* Lightbox */
   #lightbox {
@@ -498,23 +500,7 @@
     <div id="ctx-body"></div>
   </div>
 
-  <div class="img-preview-bar" id="img-preview-bar" style="display:none">
-    <div class="img-thumb-wrap" id="img-thumb-wrap" onclick="openLightbox()" title="Xem toàn màn hình">
-      <img id="img-preview-thumb" src="" alt="preview" />
-      <div class="img-thumb-overlay" id="img-thumb-overlay" style="display:none">
-        <div class="spinner"></div>
-      </div>
-    </div>
-    <div class="img-preview-info">
-      <span class="img-label" id="img-preview-label"></span>
-      <div class="img-progress-track" id="img-progress-track" style="display:none">
-        <div class="img-progress-fill" id="img-progress-fill"></div>
-      </div>
-      <span class="img-server-badge" id="img-server-badge" style="display:none"
-            onclick="openLightbox()">✓ available on server · click to preview</span>
-    </div>
-    <button class="remove-btn" type="button" onclick="clearPendingImage()">✕</button>
-  </div>
+  <div class="img-preview-bar" id="img-preview-bar" style="display:none"></div>
 
   <!-- Lightbox overlay -->
   <div id="lightbox" onclick="closeLightbox()">
@@ -971,6 +957,7 @@ ctxBar.init();
 let pendingImage   = null; // { id: string|null, mime, previewUrl, name }
 let pendingUploads = 0;   // count of in-flight uploads — button disabled while > 0
 let sentFileIds    = new Set(); // IDs already shown in a user bubble
+const uploadCards  = new Map(); // uploadId → { card, myPending, cancelled }
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
@@ -1004,79 +991,104 @@ async function handleImageFile(file) {
 
   const previewUrl = URL.createObjectURL(file);
   const kb = Math.round(file.size / 1024);
-
-  // Each concurrent upload owns its own object — no global overwrite race.
+  const uploadId = crypto.randomUUID();
   const myPending = { id: null, mime: file.type, previewUrl, name: file.name || "image" };
-  pendingImage = myPending; // last upload wins the preview bar (cosmetic only)
+  pendingImage = myPending;
 
+  // Build upload card for this specific file
+  const card = document.createElement("div");
+  card.className = "file-card is-image uploading";
+  card.dataset.uploadId = uploadId;
+  card.innerHTML = `
+    <img class="card-thumb" src="${escHtml(previewUrl)}" alt="${escHtml(file.name || 'image')}">
+    <div class="upload-overlay">
+      <div class="upload-progress"><div class="upload-fill" style="width:0%"></div></div>
+    </div>
+    <button class="card-rm" type="button" onclick="event.stopPropagation();removeUploadCard('${uploadId}')" title="Xóa">✕</button>
+    <div class="card-foot" title="${escHtml(file.name || 'image')}">${escHtml(file.name || 'image')}</div>
+  `;
+
+  const bar = document.getElementById("img-preview-bar");
+  bar.appendChild(card);
+  bar.style.display = "flex";
+
+  uploadCards.set(uploadId, { card, myPending, cancelled: false });
   pendingUploads++;
   $btn.disabled = true;
-
-  // Show preview bar for the last-started upload
-  document.getElementById("img-preview-thumb").src = previewUrl;
-  document.getElementById("img-preview-label").style.color = "";  // reset error color
-  document.getElementById("img-preview-label").textContent = `${file.name} · đang upload…`;
-  document.getElementById("img-thumb-overlay").style.display = "flex";
-  document.getElementById("img-progress-track").style.display = "block";
-  document.getElementById("img-progress-fill").style.width = "0%";
-  document.getElementById("img-server-badge").style.display = "none";
-  document.getElementById("img-preview-bar").style.display = "flex";
 
   let imageId;
   try {
     imageId = await uploadWithProgress(file, pct => {
-      // Only update progress bar if this upload is the one currently shown
-      if (pendingImage === myPending)
-        document.getElementById("img-progress-fill").style.width = `${Math.round(pct * 100)}%`;
+      if (!uploadCards.get(uploadId)?.cancelled) {
+        const fill = card.querySelector(".upload-fill");
+        if (fill) fill.style.width = `${Math.round(pct * 100)}%`;
+      }
     });
   } catch (err) {
     URL.revokeObjectURL(previewUrl);
     pendingUploads--;
-    if (pendingUploads === 0) {
-      $btn.disabled = false;
-      // Show error state in preview bar
-      document.getElementById("img-thumb-overlay").style.display = "none";
-      document.getElementById("img-progress-track").style.display = "none";
-      document.getElementById("img-preview-label").style.color = "#dc2626";
-      document.getElementById("img-preview-label").textContent = `Upload thất bại: ${err.message}`;
+    if (pendingUploads === 0) $btn.disabled = false;
+    const entry = uploadCards.get(uploadId);
+    if (!entry?.cancelled) {
+      const overlay = card.querySelector(".upload-overlay");
+      if (overlay) overlay.outerHTML = `<div class="upload-err-overlay">Upload lỗi</div>`;
+      const badge = document.createElement("div");
+      badge.className = "upload-badge err"; badge.textContent = "✕";
+      card.appendChild(badge);
+      card.classList.remove("uploading"); card.classList.add("upload-error");
     }
     return;
   }
 
-  // Upload done — update MY object, not the global (avoids id overwrite by concurrent uploads)
   myPending.id = imageId;
   pendingUploads--;
-  if (pendingUploads === 0) {
-    $btn.disabled = false;
-    // All done — show success state; bar stays visible until user sends (cleared by clearPendingImage)
-    document.getElementById("img-progress-fill").style.width = "100%";
-    document.getElementById("img-thumb-overlay").style.display = "none";
-    document.getElementById("img-progress-track").style.display = "none";
-    document.getElementById("img-preview-label").textContent = `${file.name} · ${kb} KB`;
-    document.getElementById("img-server-badge").style.display = "inline";
-  }
+  if (pendingUploads === 0) $btn.disabled = false;
 
-  // Add to files bar immediately so status is visible before sending
+  const entry = uploadCards.get(uploadId);
+  if (entry?.cancelled) { URL.revokeObjectURL(previewUrl); return; }
+
+  // Success state on card
+  const overlay = card.querySelector(".upload-overlay");
+  if (overlay) overlay.remove();
+  const badge = document.createElement("div");
+  badge.className = "upload-badge ok"; badge.textContent = "✓";
+  card.appendChild(badge);
+  card.classList.remove("uploading"); card.classList.add("upload-success");
+  card.onclick = () => openLightbox(previewUrl);
+
+  // Add to registry immediately so it's visible in the files panel
   if (!fileRegistry.some(f => f.id === imageId)) {
-    fileRegistry.push({ id: imageId, name: file.name, mime: file.type, size_kb: kb, status: "available" });
+    fileRegistry.push({ id: imageId, name: file.name || "image", mime: file.type, size_kb: kb, status: "available" });
     renderFilesBar();
   }
 }
 
+function removeUploadCard(uploadId) {
+  const entry = uploadCards.get(uploadId);
+  if (!entry) return;
+  entry.cancelled = true;
+  entry.card.remove();
+  if (entry.myPending.id) {
+    const idx = fileRegistry.findIndex(f => f.id === entry.myPending.id);
+    if (idx !== -1) { fileRegistry.splice(idx, 1); renderFilesBar(); }
+  }
+  uploadCards.delete(uploadId);
+  URL.revokeObjectURL(entry.myPending.previewUrl);
+  const bar = document.getElementById("img-preview-bar");
+  if (!bar.querySelector(".file-card")) bar.style.display = "none";
+}
+
 function clearPendingImage() {
-  // Blob URL revoked in addUserBubble.onload to avoid revoke-before-load race.
   pendingImage = null;
-  document.getElementById("img-preview-bar").style.display = "none";
-  document.getElementById("img-preview-thumb").src = "";
-  document.getElementById("img-server-badge").style.display = "none";
-  document.getElementById("img-thumb-overlay").style.display = "none";
-  $btn.disabled = false;
+  const bar = document.getElementById("img-preview-bar");
+  bar.innerHTML = "";
+  bar.style.display = "none";
+  uploadCards.clear();
 }
 
 // ── Lightbox ──────────────────────────────────────────────────────────────────
-// openLightbox(url) — explicit URL (chat bubble); openLightbox() — reads preview bar thumb (pre-send).
 function openLightbox(url) {
-  const src = url || document.getElementById("img-preview-thumb").src;
+  const src = url;
   if (!src || src === window.location.href) return;
   document.getElementById("lightbox-img").src = src;
   document.getElementById("lightbox").style.display = "flex";
