@@ -19,11 +19,14 @@ type SupervisorBackend interface {
 // web_search, read_image, and read_file are not routes — supervisor handles them as tools.
 const supervisorRoutingPrompt = `You are a routing supervisor. Classify the user's latest request into exactly one option:
 
-  json_agent  — any query about JSONPlaceholder data: users, posts, todos, comments
-  self        — everything else: greetings, small talk, factual questions, web searches,
-                file reading, image analysis, health/science/general knowledge
+  json_agent  — ONLY for JSONPlaceholder REST API: users, posts, todos, comments (no files involved)
+  self        — EVERYTHING ELSE: file/document/sheet/image operations, web search,
+                general knowledge, follow-up questions about any uploaded file
 
-RULE: When in doubt, always choose self.
+HARD RULES (override everything):
+- If the conversation has any uploaded file → ALWAYS self.
+- If the request mentions sheet, workbook, Excel, PDF, image, or any file → ALWAYS self.
+- When in doubt → self.
 Reply ONLY JSON: {"next":"json_agent"|"self","reasoning":"one short sentence"}`
 
 // supervisorChatPrompt is used when the DeepSeek supervisor answers directly.
@@ -85,7 +88,15 @@ func supervisorNode(backend SupervisorBackend, gemini *GeminiClient) func(contex
 			}
 			lines = append(lines, fmt.Sprintf("[%s]: %s", strings.ToUpper(name), p))
 		}
-		userPrompt := fmt.Sprintf("User request: %s\n\nHistory:\n%s\n\nDecide:", lastUser, strings.Join(lines, "\n"))
+		fileNote := ""
+		if len(state.FileRegistry) > 0 {
+			names := make([]string, 0, len(state.FileRegistry))
+			for _, f := range state.FileRegistry {
+				names = append(names, f.Name)
+			}
+			fileNote = fmt.Sprintf("ACTIVE FILES (%d): %s\n\n", len(state.FileRegistry), strings.Join(names, ", "))
+		}
+		userPrompt := fmt.Sprintf("%sUser request: %s\n\nHistory:\n%s\n\nDecide:", fileNote, lastUser, strings.Join(lines, "\n"))
 
 		spanID := lfUUID()
 		globalLF.SpanStart(spanID, state.TraceID, "", "supervisor", map[string]any{"query": lastUser})
@@ -240,7 +251,7 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 				map[string]any{"result": truncate(result, 300)})
 			emit(state.EventCh, "tool_result", map[string]string{
 				"name":   tc.Function.Name,
-				"result": truncateRune(result, 1200),
+				"result": result,
 			})
 
 			dsMsgs = append(dsMsgs, dsChatMsg{
