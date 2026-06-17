@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -110,12 +111,14 @@ func mustEnv(key string) string {
 // ── HTTP types ────────────────────────────────────────────────────────────────
 
 type chatRequest struct {
-	Message   string        `json:"message"`
-	SessionID string        `json:"session_id"`
-	History   []messageJSON `json:"history"`
-	ImageID   string        `json:"image_id,omitempty"`
-	ImageB64  string        `json:"image_b64,omitempty"`
-	ImageMime string        `json:"image_mime,omitempty"`
+	Message      string        `json:"message"`
+	SessionID    string        `json:"session_id"`
+	History      []messageJSON `json:"history"`
+	FileRegistry []FileEntry   `json:"file_registry,omitempty"` // accumulated across turns
+	// Backward-compat image fields (single image sent inline or resolved from upload).
+	ImageID   string `json:"image_id,omitempty"`
+	ImageB64  string `json:"image_b64,omitempty"`
+	ImageMime string `json:"image_mime,omitempty"`
 }
 
 type messageJSON struct {
@@ -131,6 +134,7 @@ func main() {
 	serverSessionID = "go_mas_agent_handoff_" + lfUUID()
 	initLangfuse()
 	initMinio()
+	initPythonEnv()
 
 	gemini := NewGeminiClient(mustEnv("GOOGLE_API_KEY"))
 	ds := NewDSClient(mustEnv("DEEPSEEK_API_KEY"))
@@ -144,6 +148,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/config", corsMiddleware(configHandler))
 	mux.HandleFunc("/upload", corsMiddleware(uploadHandler))
+	mux.HandleFunc("/upload-doc", corsMiddleware(uploadDocHandler))
 	mux.HandleFunc("/image/", corsMiddleware(imageHandler))
 	mux.HandleFunc("/chat", corsMiddleware(chatHandler(g)))
 	mux.Handle("/", staticHandler())
@@ -186,8 +191,7 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 			return
 		}
 
-		// Resolve image bytes for the LLM.
-		// getImageForLLM handles both MinIO (fetches from object store) and memory (reads B64).
+		// Resolve image bytes for the LLM (backward compat for inline/upload image).
 		imageB64, imageMime := req.ImageB64, req.ImageMime
 		if req.ImageID != "" {
 			if b64, mime, ok := getImageForLLM(req.ImageID); ok {
@@ -199,7 +203,30 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 			}
 		}
 
-		// Build message history
+		// Backward-compat: promote a bare ImageID into the FileRegistry so the
+		// new tool-based flow can read it without a separate upload-doc call.
+		fileRegistry := req.FileRegistry
+		if req.ImageID != "" {
+			alreadyInRegistry := false
+			for _, fe := range fileRegistry {
+				if fe.ID == req.ImageID {
+					alreadyInRegistry = true
+					break
+				}
+			}
+			if !alreadyInRegistry {
+				sizeKB := len(imageB64) * 3 / 4 / 1024
+				fileRegistry = append(fileRegistry, FileEntry{
+					ID:     req.ImageID,
+					Name:   "image_" + req.ImageID[:8],
+					Mime:   imageMime,
+					SizeKB: sizeKB,
+					Status: "available",
+				})
+			}
+		}
+
+		// Build message history.
 		msgs := make([]Message, 0, len(req.History)+1)
 		for _, m := range req.History {
 			msgs = append(msgs, Message{Role: m.Role, Content: m.Content, Name: m.Name})
@@ -227,12 +254,14 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 		go func() {
 			defer close(eventCh)
 			state := AgentState{
-				Messages:  msgs,
-				EventCh:   eventCh,
-				TraceID:   traceID,
-				SessionID: sessionID,
-				ImageB64:  imageB64,
-				ImageMime: imageMime,
+				Messages:      msgs,
+				FileRegistry:  fileRegistry,
+				ArtifactStore: make(map[string]string),
+				EventCh:       eventCh,
+				TraceID:       traceID,
+				SessionID:     sessionID,
+				ImageB64:      imageB64,
+				ImageMime:     imageMime,
 			}
 			result, err := g.Invoke(r.Context(), state)
 			if err != nil {
@@ -258,6 +287,56 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 			flusher.Flush()
 		}
 	}
+}
+
+// uploadDocHandler accepts multipart/form-data with a "file" field for non-image documents
+// (xlsx, pdf, docx, csv, txt). Returns a FileEntry JSON the frontend keeps in its registry.
+func uploadDocHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 20<<20)
+	if err := r.ParseMultipartForm(20 << 20); err != nil {
+		http.Error(w, "too large or malformed", http.StatusRequestEntityTooLarge)
+		return
+	}
+	file, hdr, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing 'file' field", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "read error", http.StatusInternalServerError)
+		return
+	}
+
+	mime := hdr.Header.Get("Content-Type")
+	if mime == "" || mime == "application/octet-stream" {
+		mime = detectMimeByExt(hdr.Filename)
+	}
+
+	id := lfUUID()
+	if err := storeDocument(id, mime, data); err != nil {
+		http.Error(w, "storage error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	entry := FileEntry{
+		ID:     id,
+		Name:   hdr.Filename,
+		Mime:   mime,
+		SizeKB: len(data) / 1024,
+		Status: "available",
+	}
+
+	fmt.Printf("[upload-doc] %s (%s, %dKB) → %s\n", hdr.Filename, mime, entry.SizeKB, id)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entry) //nolint:errcheck
 }
 
 func staticHandler() http.Handler {

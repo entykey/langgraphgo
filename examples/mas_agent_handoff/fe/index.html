@@ -248,6 +248,28 @@
     white-space: nowrap;
   }
   .input-area button:disabled { opacity: .45; cursor: not-allowed; }
+  .attach-btn {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    border-radius: var(--radius); padding: 10px 12px; font-size: 15px; cursor: pointer;
+    transition: border-color .15s, color .15s; line-height: 1; flex-shrink: 0;
+  }
+  .attach-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Attached-documents bar */
+  .files-bar { padding: 6px 20px 0; flex-shrink: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+  .file-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 20px;
+    padding: 3px 6px 3px 10px; font-size: 11px; color: var(--muted); font-family: var(--mono);
+    transition: border-color .15s;
+  }
+  .file-chip.uploading { opacity: .6; }
+  .file-chip.read { border-color: #15803d; color: #15803d; }
+  .file-chip .rm-file {
+    background: none; border: none; cursor: pointer; color: var(--muted);
+    padding: 0 2px; font-size: 10px; line-height: 1; transition: color .15s;
+  }
+  .file-chip .rm-file:hover { color: #ef4444; }
 
   /* Image preview strip above input */
   .img-preview-bar {
@@ -351,6 +373,7 @@
         <span class="hint-chip" onclick="fillInput(this)">Post 3 có những comments gì?</span>
         <span class="hint-chip" onclick="fillInput(this)">Hôm nay giá vàng bao nhiêu?</span>
         <span class="hint-chip" onclick="fillInput(this)">Xin chào, tôi là Tuấn</span>
+        <span class="hint-chip" onclick="fillInput(this)">Đọc file đã đính kèm và tóm tắt nội dung</span>
       </div>
     </div>
   </div>
@@ -362,6 +385,9 @@
     </div>
     <div id="ctx-body"></div>
   </div>
+
+  <!-- Attached documents bar (persists across turns) -->
+  <div class="files-bar" id="files-bar" style="display:none"></div>
 
   <div class="img-preview-bar" id="img-preview-bar" style="display:none">
     <div class="img-thumb-wrap" id="img-thumb-wrap" onclick="openLightbox()" title="Xem toàn màn hình">
@@ -389,6 +415,10 @@
 
   <form class="input-area" id="form" autocomplete="off">
     <input id="input" placeholder="Hỏi gì đó… hoặc dán / kéo ảnh vào đây" />
+    <button type="button" class="attach-btn" title="Đính kèm file (xlsx, pdf, docx, csv, ảnh)"
+            onclick="document.getElementById('doc-file-input').click()">📎</button>
+    <input type="file" id="doc-file-input" accept=".xlsx,.xls,.pdf,.docx,.csv,.txt,.png,.jpg,.jpeg"
+           style="display:none" onchange="handleDocFileInput(this)">
     <button type="submit" id="send-btn">Gửi</button>
   </form>
 </div>
@@ -400,7 +430,8 @@ marked.setOptions({ breaks: true, gfm: true });
 // No localStorage — stale sessions no longer accumulate across server restarts.
 let sessionId = "";
 
-let history = [];
+let history      = [];
+let fileRegistry = []; // FileEntry[] persists across turns; sent with every chat request
 let config  = { supervisor: "?", json_agent: "?", search: "?" };
 
 fetch("/config").then(r => r.json()).then(c => {
@@ -478,7 +509,7 @@ function getTextBlock(bubble) {
   return last;
 }
 
-function addToolChip(bubble, name, query) {
+function addToolChip(bubble, name, query, fileId) {
   if (!bubble) return;
   hideInfobar(bubble);
   const content = bubble.querySelector(".bubble-content");
@@ -500,14 +531,25 @@ function addToolChip(bubble, name, query) {
   const item = document.createElement("div");
   item.className = "tool-item loading";
   item.dataset.toolName = name;
-  if (query) item.dataset.query = query;
+  if (query)  item.dataset.query  = query;
+  if (fileId) item.dataset.fileId = fileId;
 
   const header = document.createElement("div");
   header.className = "tool-header";
 
   const label = document.createElement("span");
   label.className = "tool-label";
-  label.textContent = name === "web_search" && query ? `🌐 "${query}"` : `🔧 ${name}`;
+  let chipLabel;
+  if (name === "web_search" && query) {
+    chipLabel = `🌐 "${query}"`;
+  } else if ((name === "read_image" || name === "read_file") && fileId) {
+    const entry = fileRegistry.find(f => f.id === fileId);
+    const fname = entry?.name || fileId.slice(0, 8);
+    chipLabel = name === "read_image" ? `🖼️ ${fname}` : `📄 ${fname}`;
+  } else {
+    chipLabel = `🔧 ${name}`;
+  }
+  label.textContent = chipLabel;
 
   const chevron = document.createElement("span");
   chevron.className = "tool-chevron";
@@ -862,6 +904,71 @@ $layout.addEventListener("drop", e => {
   if (file?.type.startsWith("image/")) handleImageFile(file);
 });
 
+// ── Document file upload ──────────────────────────────────────────────────────
+const FILE_ICON = mime =>
+  mime.includes("pdf") ? "📄"
+  : mime.includes("spreadsheet") || mime.includes("excel") ? "📊"
+  : mime.includes("wordprocessingml") ? "📝"
+  : mime === "text/csv" ? "📋"
+  : mime.startsWith("image/") ? "🖼️"
+  : "📎";
+
+function renderFilesBar() {
+  const bar = document.getElementById("files-bar");
+  if (fileRegistry.length === 0) { bar.style.display = "none"; return; }
+  bar.style.display = "flex";
+  bar.innerHTML = fileRegistry.map((f, i) => {
+    const statusClass = f.status === "read" ? " read" : f.status === "uploading" ? " uploading" : "";
+    const readBadge   = f.status === "read" ? " ✓" : "";
+    return `<div class="file-chip${statusClass}" title="${escHtml(f.name)} — ${f.size_kb}KB">
+      ${FILE_ICON(f.mime || '')} ${escHtml(f.name)}${readBadge}
+      <button class="rm-file" type="button" onclick="removeFileAt(${i})" title="Xóa">✕</button>
+    </div>`;
+  }).join("");
+}
+
+function removeFileAt(i) {
+  fileRegistry.splice(i, 1);
+  renderFilesBar();
+}
+
+async function handleDocFileInput(input) {
+  const file = input.files?.[0];
+  input.value = "";            // allow re-selecting same file
+  if (!file) return;
+  if (file.size > 20 * 1024 * 1024) {
+    alert(`File quá lớn (${(file.size / 1024 / 1024).toFixed(1)} MB). Tối đa 20 MB.`);
+    return;
+  }
+
+  // For images, use the existing upload path which does compression.
+  if (file.type.startsWith("image/")) { handleImageFile(file); return; }
+
+  // Show a placeholder chip while uploading.
+  const placeholder = { id: null, name: file.name, mime: file.type || "application/octet-stream",
+                         size_kb: Math.round(file.size / 1024), status: "uploading" };
+  fileRegistry.push(placeholder);
+  renderFilesBar();
+
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const resp = await fetch("/upload-doc", { method: "POST", body: fd });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const entry = await resp.json();
+    // Replace placeholder with real entry.
+    const idx = fileRegistry.indexOf(placeholder);
+    if (idx !== -1) fileRegistry.splice(idx, 1, entry);
+    else fileRegistry.push(entry);
+    renderFilesBar();
+  } catch (err) {
+    const idx = fileRegistry.indexOf(placeholder);
+    if (idx !== -1) fileRegistry.splice(idx, 1);
+    renderFilesBar();
+    alert(`Upload lỗi: ${err.message}`);
+  }
+}
+
 // ── Chat ──────────────────────────────────────────────────────────────────────
 document.getElementById("form").addEventListener("submit", async e => {
   e.preventDefault();
@@ -933,6 +1040,7 @@ async function sendMessage(message) {
         message,
         session_id: sessionId,
         history,
+        file_registry: fileRegistry,
         image_id: imgSnapshot?.id || "",
       }),
     });
@@ -976,12 +1084,20 @@ async function sendMessage(message) {
 
           case "tool_call": {
             ensureBubble();
-            const isWS = data.name === "web_search";
-            const infoText = isWS && data.query
-              ? `🌐 Đang tìm kiếm: "${data.query}"...`
-              : `🔧 ${data.name}()...`;
+            let infoText;
+            if (data.name === "web_search" && data.query) {
+              infoText = `🌐 Đang tìm kiếm: "${data.query}"...`;
+            } else if (data.name === "read_image" && data.file_id) {
+              const e = fileRegistry.find(f => f.id === data.file_id);
+              infoText = `🖼️ Đang đọc ảnh: ${e?.name || data.file_id.slice(0,8)}...`;
+            } else if (data.name === "read_file" && data.file_id) {
+              const e = fileRegistry.find(f => f.id === data.file_id);
+              infoText = `📄 Đang đọc file: ${e?.name || data.file_id.slice(0,8)}...`;
+            } else {
+              infoText = `🔧 ${data.name}()...`;
+            }
             setInfobar(curBubble, infoText);
-            addToolChip(curBubble, data.name, data.query);
+            addToolChip(curBubble, data.name, data.query, data.file_id);
             break;
           }
 
@@ -1023,15 +1139,20 @@ async function sendMessage(message) {
           }
 
           case "tool_result": {
-            // Mark the oldest still-loading chip of this tool as done and attach result.
             if (curBubble) {
               const items = curBubble.querySelectorAll(`.tool-item[data-tool-name="${data.name}"].loading`);
-              const item = items[0]; // FIFO: first pending = oldest call
+              const item = items[0]; // FIFO
               if (item) {
                 item.classList.remove("loading", "streaming");
                 item.classList.add("has-result");
                 const body = item.querySelector(".tool-body");
                 if (body) body.textContent = data.result || "";
+                // Update file registry status when a file tool completes
+                const fid = item.dataset.fileId;
+                if (fid) {
+                  const entry = fileRegistry.find(f => f.id === fid);
+                  if (entry) { entry.status = 'read'; renderFilesBar(); }
+                }
               }
             }
             ctxBar.addToolChars((data.result || '').length);

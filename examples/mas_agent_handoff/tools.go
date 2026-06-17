@@ -10,6 +10,30 @@ import (
 
 const jsonPlaceholderBase = "https://jsonplaceholder.typicode.com"
 
+// TaskBrief is the structured briefing a supervisor composes before handing off to a subagent.
+// The subagent only sees the brief, not the full conversation — so the more detailed, the better.
+type TaskBrief struct {
+	Task            string   `json:"task"`
+	UserIntent      string   `json:"user_intent"`
+	FocusAreas      []string `json:"focus_areas,omitempty"`
+	OutputFormat    string   `json:"output_format"`
+	SuccessCriteria []string `json:"success_criteria"`
+	Rules           []string `json:"rules,omitempty"`
+	SpecificFields  []string `json:"specific_fields,omitempty"`
+}
+
+// MIME classification helpers used by file dispatch logic.
+func isSpreadsheet(mime string) bool {
+	return strings.Contains(mime, "spreadsheet") ||
+		strings.Contains(mime, "excel") ||
+		mime == "text/csv"
+}
+func isPDF(mime string) bool { return strings.Contains(mime, "pdf") }
+func isWord(mime string) bool {
+	return strings.Contains(mime, "wordprocessingml") || strings.Contains(mime, "msword")
+}
+func isImageMime(mime string) bool { return strings.HasPrefix(mime, "image/") }
+
 // ToolDef describes a function tool for the DeepSeek function-calling API.
 type ToolDef struct {
 	Name        string

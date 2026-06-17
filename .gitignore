@@ -22,3 +22,6 @@ example_summary.txt
 
 # Comic generation output
 examples/comic_skill_example/comic/
+
+# mas_agent_handoff Python venv
+examples/mas_agent_handoff/agent_venv/

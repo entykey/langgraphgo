@@ -16,22 +16,29 @@ type SupervisorBackend interface {
 }
 
 // supervisorRoutingPrompt classifies each turn into exactly one of two buckets.
-// web_search is no longer a route — the supervisor handles it as a tool in self-reply.
+// web_search, read_image, and read_file are not routes — supervisor handles them as tools.
 const supervisorRoutingPrompt = `You are a routing supervisor. Classify the user's latest request into exactly one option:
 
   json_agent  — any query about JSONPlaceholder data: users, posts, todos, comments
   self        — everything else: greetings, small talk, factual questions, web searches,
-                visual follow-up questions, health/science/general knowledge
+                file reading, image analysis, health/science/general knowledge
 
 RULE: When in doubt, always choose self.
 Reply ONLY JSON: {"next":"json_agent"|"self","reasoning":"one short sentence"}`
 
 // supervisorChatPrompt is used when the DeepSeek supervisor answers directly.
-// It has access to the web_search tool and should use it for live information.
+// File context (registry) is appended dynamically by buildFileContext().
 const supervisorChatPrompt = `Bạn là trợ lý thông minh, thân thiện. Trả lời bằng tiếng Việt.
 Nhớ lịch sử hội thoại. Không bịa thông tin.
-Khi cần thông tin thực tế mới nhất hoặc không chắc chắn, hãy gọi tool web_search.
-Khi có kết quả web_search, tổng hợp câu trả lời rõ ràng và đính kèm nguồn tham khảo.`
+
+Khi cần thông tin thực tế mới nhất, gọi tool web_search.
+Khi user hỏi về file hoặc cần đọc file:
+  - Gọi read_image(file_id, task_brief) cho ảnh/hình
+  - Gọi read_file(file_id, task_brief) cho xlsx, pdf, docx, csv
+  - LUÔN điền task_brief đầy đủ — subagent không biết gì ngoài brief của bạn
+  - Brief mô tả rõ: cần extract gì, từ vùng nào, format output ra sao
+
+Khi tổng hợp kết quả từ tool, trình bày rõ ràng và đính kèm nguồn nếu có.`
 
 // supervisorChatPromptSimple is used for the Gemini supervisor fallback (no tool calling).
 const supervisorChatPromptSimple = `Bạn là trợ lý thân thiện. Trả lời ngắn gọn, tự nhiên bằng tiếng Việt.
@@ -43,8 +50,8 @@ type routingDecision struct {
 }
 
 // supervisorNode routes the request or self-replies.
-// When backend is *DSClient: self-reply uses a DeepSeek ReAct loop with web_search as a tool,
-// so web results are fetched and synthesised by the supervisor itself.
+// When backend is *DSClient: self-reply uses a DeepSeek ReAct loop with web_search,
+// read_image, and read_file as tools.
 // When backend is *GeminiClient: falls back to simple StreamReply (no tool calling).
 func supervisorNode(backend SupervisorBackend, gemini *GeminiClient) func(context.Context, AgentState) (AgentState, error) {
 	ds, isDS := backend.(*DSClient)
@@ -55,16 +62,6 @@ func supervisorNode(backend SupervisorBackend, gemini *GeminiClient) func(contex
 
 		if state.Step > 8 {
 			state.Next = "FINISH"
-			return state, nil
-		}
-
-		// Image present → skip LLM routing, go straight to vision_agent.
-		if state.ImageB64 != "" {
-			emit(state.EventCh, "routing", map[string]string{
-				"decision":  "vision_agent",
-				"reasoning": fmt.Sprintf("image detected (%s) → Gemini VLM", state.ImageMime),
-			})
-			state.Next = "vision_agent"
 			return state, nil
 		}
 
@@ -149,13 +146,20 @@ func supervisorNode(backend SupervisorBackend, gemini *GeminiClient) func(contex
 	}
 }
 
-// supervisorReplyWithTools runs a DeepSeek ReAct loop with web_search available as a tool.
-// The supervisor decides on its own whether to call web_search or answer directly.
+// supervisorReplyWithTools runs a DeepSeek ReAct loop with web_search, read_image,
+// and read_file available as tools. Uses toolsMap dispatch (same pattern as json_agent).
 func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClient, gemini *GeminiClient, spanID string) (AgentState, error) {
 	wsTool := makeWebSearchTool(ctx, gemini, state.EventCh)
-	wsAPITools := buildAPITools([]ToolDef{wsTool})
+	readImgTool := makeReadImageTool(ctx, gemini, state.EventCh)
+	readFileTool := makeReadFileTool(ctx, state.EventCh)
 
-	dsMsgs := []dsChatMsg{{Role: "system", Content: strPtr(supervisorChatPrompt)}}
+	allTools := []ToolDef{wsTool, readImgTool, readFileTool}
+	wsAPITools := buildAPITools(allTools)
+	tmap := toolsMap(allTools)
+
+	systemPrompt := supervisorChatPrompt + buildFileContext(state.FileRegistry)
+
+	dsMsgs := []dsChatMsg{{Role: "system", Content: strPtr(systemPrompt)}}
 	for _, m := range state.Messages {
 		role := m.Role
 		if role == "model" {
@@ -187,7 +191,6 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 			replyFirstDelta = firstDelta
 		}
 
-		// Final answer round — no tool calls.
 		if len(resp.ToolCalls) == 0 {
 			if resp.Content != nil {
 				fullText = *resp.Content
@@ -198,7 +201,6 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 			break
 		}
 
-		// Tool call round.
 		globalLF.GenerationEnd(replyID, state.TraceID,
 			map[string]any{"tool_calls": len(resp.ToolCalls)},
 			promptTok, completionTok, firstDelta)
@@ -209,17 +211,29 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 			if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil {
 				args = map[string]any{}
 			}
+
 			toolEvt := map[string]string{"name": tc.Function.Name}
 			if q, _ := args["query"].(string); q != "" {
 				toolEvt["query"] = q
 			}
+			if fid, _ := args["file_id"].(string); fid != "" {
+				toolEvt["file_id"] = fid
+			}
 			emit(state.EventCh, "tool_call", toolEvt)
-			fmt.Printf("[supervisor] tool: %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
+			fmt.Printf("[supervisor] tool: %s(%s)\n", tc.Function.Name, truncate(tc.Function.Arguments, 120))
 
 			toolSpanID := lfUUID()
 			globalLF.SpanStart(toolSpanID, state.TraceID, spanID, tc.Function.Name,
 				map[string]any{"args": tc.Function.Arguments})
-			result := wsTool.Fn(args)
+
+			def, ok := tmap[tc.Function.Name]
+			var result string
+			if !ok {
+				result = fmt.Sprintf("Unknown tool: %s", tc.Function.Name)
+			} else {
+				result = def.Fn(args)
+			}
+
 			globalLF.SpanEnd(toolSpanID, state.TraceID,
 				map[string]any{"result": truncate(result, 300)})
 			emit(state.EventCh, "tool_result", map[string]string{
@@ -259,4 +273,48 @@ func supervisorReplySimple(ctx context.Context, state AgentState, backend Superv
 	state.Messages = append(state.Messages, Message{Role: "model", Content: text, Name: "supervisor"})
 	state.Next = "FINISH"
 	return state, nil
+}
+
+// buildFileContext builds a file registry section to inject into the supervisor system prompt.
+// Only metadata is injected — content is only available after a read_image/read_file call.
+func buildFileContext(files []FileEntry) string {
+	if len(files) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\n## Files trong conversation này:\n")
+	for _, f := range files {
+		icon := fileIcon(f.Mime)
+		fmt.Fprintf(&sb, "- %s `%s` (id: `%s`, %dKB) [%s]",
+			icon, f.Name, f.ID, f.SizeKB, f.Status)
+		if f.Summary != "" {
+			sb.WriteString(" — " + f.Summary)
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString(`
+Khi user hỏi về file:
+- Gọi read_image(file_id, task_brief) cho ảnh
+- Gọi read_file(file_id, task_brief) cho xlsx/pdf/docx
+- task_brief PHẢI mô tả đầy đủ: task, user_intent, output_format, success_criteria
+- File có status="read" đã được đọc trước — có thể gọi lại nếu cần thêm detail
+`)
+	return sb.String()
+}
+
+func fileIcon(mime string) string {
+	switch {
+	case strings.Contains(mime, "spreadsheet") || strings.Contains(mime, "excel"):
+		return "📊"
+	case strings.Contains(mime, "pdf"):
+		return "📄"
+	case strings.HasPrefix(mime, "image/"):
+		return "🖼️"
+	case strings.Contains(mime, "wordprocessingml"):
+		return "📝"
+	case mime == "text/csv":
+		return "📋"
+	default:
+		return "📎"
+	}
 }
