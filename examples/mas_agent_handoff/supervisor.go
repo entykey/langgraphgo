@@ -204,6 +204,11 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 			replyFirstDelta = firstDelta
 		}
 
+		// Emit real token counts so the FE context bar shows accurate numbers.
+		emit(state.EventCh, "usage", map[string]any{
+			"agent": "supervisor", "prompt_tok": promptTok, "completion_tok": completionTok,
+		})
+
 		if len(resp.ToolCalls) == 0 {
 			if resp.Content != nil {
 				fullText = *resp.Content

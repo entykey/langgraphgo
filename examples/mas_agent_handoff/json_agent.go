@@ -81,6 +81,9 @@ func jsonAgentNode(ds *DSClient) func(context.Context, AgentState) (AgentState, 
 				roundOut["content_preview"] = truncate(*resp.Content, 200)
 			}
 			globalLF.GenerationEnd(genID, state.TraceID, roundOut, promptTok, completionTok, firstDelta)
+			emit(state.EventCh, "usage", map[string]any{
+				"agent": "json_agent", "prompt_tok": promptTok, "completion_tok": completionTok,
+			})
 			fmt.Printf("[json_agent] round %d done in %.2fs, tool_calls=%d\n",
 				round+1, time.Since(t0).Seconds(), len(resp.ToolCalls))
 

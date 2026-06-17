@@ -709,6 +709,7 @@ const ctxBar = (() => {
   function fmtT(t)  { return t >= 1000 ? (t / 1024).toFixed(1) + 'K' : String(t); }
 
   const turnState   = {};  // { [agentKey]: { toolChars, outputChars } }
+  const realUsage   = {};  // { [agentKey]: { promptTok, completionTok } } — from BE SSE "usage" events
   let activeAgents  = [];
   let currentAgent  = null;
 
@@ -718,20 +719,28 @@ const ctxBar = (() => {
 
   function renderRow(key, hTok) {
     const cfg = AGENT_CFG[key] || { label: key, color: '#888', model: key, limit: 64*1024, sys: 120 };
-    const st  = turnState[key] || { toolChars: 0, outputChars: 0 };
-    const sysTok  = cfg.sys;
-    const toolTok = c2t(st.toolChars);
-    const outTok  = c2t(st.outputChars);
-    const total   = sysTok + hTok + toolTok + outTok;
-    const pct     = (total / cfg.limit * 100).toFixed(2);
-    // Scale bar so used slice is always visible against a 10% band for large windows
-    const displayLimit = Math.max(cfg.limit, total * 10);
-    const segs = [
-      { tok: sysTok,  color: CTX_COLOR.sys,     name: 'System Prompt' },
-      { tok: hTok,    color: CTX_COLOR.history,  name: 'History' },
-      { tok: toolTok, color: CTX_COLOR.tools,    name: 'Tools' },
-      { tok: outTok,  color: CTX_COLOR.output,   name: 'Output' },
-    ];
+    const real = realUsage[key];
+    let segs, total;
+    if (real) {
+      // Real token counts from BE — most accurate.
+      total = real.promptTok + real.completionTok;
+      segs = [
+        { tok: real.promptTok,      color: CTX_COLOR.history, name: 'Input'  },
+        { tok: real.completionTok,  color: CTX_COLOR.output,  name: 'Output' },
+      ];
+    } else {
+      const st      = turnState[key] || { toolChars: 0, outputChars: 0 };
+      const sysTok  = cfg.sys;
+      const toolTok = c2t(st.toolChars);
+      const outTok  = c2t(st.outputChars);
+      total = sysTok + hTok + toolTok + outTok;
+      segs = [
+        { tok: sysTok,  color: CTX_COLOR.sys,     name: 'System Prompt' },
+        { tok: hTok,    color: CTX_COLOR.history,  name: 'History' },
+        { tok: toolTok, color: CTX_COLOR.tools,    name: 'Tools' },
+        { tok: outTok,  color: CTX_COLOR.output,   name: 'Output' },
+      ];
+    }
     const bar = segs.map(s => {
       const w = (s.tok / displayLimit * 100).toFixed(3);
       return `<div class="ctx-seg" style="width:${w}%;background:${s.color}"></div>`;
@@ -756,10 +765,14 @@ const ctxBar = (() => {
 
   return {
     newTurn() {
-      // Clear all per-turn state when user submits a new message.
       Object.keys(turnState).forEach(k => delete turnState[k]);
+      Object.keys(realUsage).forEach(k => delete realUsage[k]);
       activeAgents = [];
       currentAgent = null;
+      render();
+    },
+    setRealUsage(agent, promptTok, completionTok) {
+      realUsage[agent] = { promptTok, completionTok };
       render();
     },
     reset(agent) {
@@ -1178,6 +1191,11 @@ async function sendMessage(message) {
             markFirstToken();
             ctxBar.addOutput(data.text);
             setBatchText(curBubble, data.text);
+            break;
+
+          case "usage":
+            if (data.agent && data.prompt_tok != null)
+              ctxBar.setRealUsage(data.agent, data.prompt_tok, data.completion_tok || 0);
             break;
 
           case "done":
