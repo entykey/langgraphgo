@@ -1199,6 +1199,18 @@ async function sendMessage(message) {
     history.push({ role: "user", content: message });
     for (const t of turns) history.push({ role: "model", content: t.content, name: t.agent });
 
+    // Persist image in fileRegistry after the turn so supervisor can reference it in future turns.
+    if (imgSnapshot?.id && !fileRegistry.some(f => f.id === imgSnapshot.id)) {
+      fileRegistry.push({
+        id:      imgSnapshot.id,
+        name:    imgSnapshot.name || ("image_" + imgSnapshot.id.slice(0, 8)),
+        mime:    imgSnapshot.mime || "image/jpeg",
+        size_kb: 0,
+        status:  "available",
+      });
+      renderFilesBar();
+    }
+
   } catch (err) {
     hideFlow();
     const eb = createAiBubble("⚠️ Kết nối lỗi");

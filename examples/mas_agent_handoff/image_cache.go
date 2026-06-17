@@ -164,7 +164,21 @@ func lookupImage(id string) (imageEntry, bool) {
 func getImageForLLM(id string) (b64, mime string, ok bool) {
 	entry, found := lookupImage(id)
 	if !found {
-		return "", "", false
+		// imageCache miss — recover from MinIO (handles server-restart case).
+		if !minioEnabled() {
+			return "", "", false
+		}
+		data, fetchedMime, err := minioGetBytes(id)
+		if err != nil {
+			fmt.Printf("[image] MinIO recovery failed for %s: %v\n", id, err)
+			return "", "", false
+		}
+		// Restore metadata so future lookups hit the fast path.
+		imageCache.Store(id, imageEntry{Mime: fetchedMime})
+		encoded := base64.StdEncoding.EncodeToString(data)
+		b64Cache.Store(id, encoded)
+		fmt.Printf("[image] MinIO recovered %s (%s)\n", id, fetchedMime)
+		return encoded, fetchedMime, true
 	}
 
 	// b64Cache hit — zero MinIO round-trip, zero re-encode
