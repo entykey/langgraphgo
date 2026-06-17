@@ -142,6 +142,13 @@
   .tool-item.error .tool-chevron { display: inline; }
   .tool-item.error .tool-result { color: #b91c1c; }
   .tool-label { flex: 1; }
+  .tool-tok {
+    font-size: 10px; font-family: var(--mono);
+    color: #b45309; opacity: .75;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .tool-item.has-result .tool-tok { color: #15803d; }
+  .tool-item.error     .tool-tok { color: #dc2626; }
   .tool-chevron {
     opacity: .5; font-size: 9px;
     transition: transform .2s;
@@ -150,21 +157,21 @@
   .tool-item.has-result .tool-chevron { display: inline; }
   .tool-item.expanded .tool-chevron { transform: rotate(180deg); }
   @keyframes text-shimmer {
-    0%   { background-position: -200% center; }
-    100% { background-position:  200% center; }
+    0%   { background-position: 80% center; }
+    100% { background-position: 20% center; }
   }
   .tool-item.loading .tool-label {
     background: linear-gradient(
       90deg,
-      #c2410c 0%, #c2410c 30%,
-      #f97316 50%,
-      #c2410c 70%, #c2410c 100%
+      #c2410c 0%, #c2410c 45%,
+      #fb923c 48%, #fef3c7 50%, #fb923c 52%,
+      #c2410c 55%, #c2410c 100%
     );
-    background-size: 200% auto;
+    background-size: 600% auto;
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
-    animation: text-shimmer 1.5s ease-in-out infinite;
+    animation: text-shimmer 1.4s ease-in-out infinite;
   }
 
   .tool-body {
@@ -306,22 +313,45 @@
   }
   .attach-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-  /* Attached-documents bar */
-  .files-bar { padding: 6px 20px 0; flex-shrink: 0; display: flex; flex-wrap: wrap; gap: 6px; }
-  .file-chip {
-    display: inline-flex; align-items: center; gap: 5px;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 20px;
-    padding: 3px 6px 3px 10px; font-size: 11px; color: var(--muted); font-family: var(--mono);
-    transition: border-color .15s;
+  /* File card grid — used in files-bar and user bubble attachments */
+  .files-bar { padding: 8px 20px 0; flex-shrink: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+  .msg-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; justify-content: flex-end; }
+
+  .file-card {
+    width: 84px; border-radius: 9px; overflow: hidden;
+    border: 1.5px solid var(--border); background: var(--surface);
+    position: relative; flex-shrink: 0; transition: border-color .15s;
   }
-  .file-chip.uploading { opacity: .6; }
-  .file-chip.read { border-color: #15803d; color: #15803d; }
-  .file-chip.available { border-color: #2563eb; color: #2563eb; }
-  .file-chip .rm-file {
-    background: none; border: none; cursor: pointer; color: var(--muted);
-    padding: 0 2px; font-size: 10px; line-height: 1; transition: color .15s;
+  .file-card.is-image { cursor: zoom-in; }
+  .file-card.available { border-color: #3b82f6; }
+  .file-card.read      { border-color: #16a34a; }
+  .file-card.uploading { opacity: .65; }
+
+  /* Image thumbnail */
+  .file-card .card-thumb { width: 84px; height: 76px; object-fit: cover; display: block; }
+
+  /* Document art */
+  .file-card .card-art {
+    width: 84px; height: 76px; background: #f1f5f9;
+    display: flex; flex-direction: column; padding: 9px 10px 7px; gap: 5px; box-sizing: border-box;
   }
-  .file-chip .rm-file:hover { color: #ef4444; }
+  .doc-line { height: 3px; background: #cbd5e1; border-radius: 2px; }
+  .card-type {
+    margin-top: auto; font-size: 8px; font-weight: 700; letter-spacing: .4px;
+    color: #64748b; background: #e2e8f0; padding: 1px 4px; border-radius: 3px; align-self: flex-start;
+  }
+
+  .card-foot {
+    padding: 3px 5px; font-size: 9px; color: #374151; background: var(--surface);
+    border-top: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    line-height: 1.4;
+  }
+  .card-rm {
+    position: absolute; top: 3px; right: 3px; width: 15px; height: 15px; border-radius: 50%;
+    background: rgba(0,0,0,.45); color: #fff; border: none; font-size: 8px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .card-rm:hover { background: rgba(220,38,38,.85); }
 
   /* Image preview strip above input */
   .img-preview-bar {
@@ -634,7 +664,11 @@ function addToolChip(bubble, name, query, fileId, task, intent) {
   chevron.className = "tool-chevron";
   chevron.textContent = "▾";
 
+  const tok = document.createElement("span");
+  tok.className = "tool-tok";
+
   header.appendChild(label);
+  header.appendChild(tok);
   header.appendChild(chevron);
 
   const body = document.createElement("div");
@@ -742,27 +776,13 @@ function escHtml(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replac
 function setInputDisabled(v) { $input.disabled = v; $btn.disabled = v; }
 function fillInput(el) { $input.value = el.textContent; $input.focus(); }
 
-function addUserBubble(text, previewUrl, imageId) {
+function addUserBubble(text, files) {
   const el = document.createElement("div");
   el.className = "msg user";
-  // Use server URL for the chat bubble so the image remains accessible after blob revoke.
-  // Blob URL is kept only for the initial preview bar thumbnail.
-  const bubbleSrc = imageId ? `/image/${imageId}` : previewUrl;
-  const imgHtml = bubbleSrc
-    ? `<img src="${bubbleSrc}"
-           style="max-height:120px;border-radius:8px;display:block;margin-bottom:6px;cursor:zoom-in;"
-           onclick="openLightbox('/image/${imageId || ''}')"
-           title="Click để xem toàn màn hình">`
+  const attachHtml = files && files.length > 0
+    ? `<div class="msg-attachments">${files.map(f => buildFileCard(f, -1, false)).join("")}</div>`
     : "";
-  el.innerHTML = `<div class="avatar">🙋</div><div class="bubble"><div class="bubble-body">${imgHtml}${escHtml(text)}</div></div>`;
-  // Revoke blob URL only when not using server URL (fallback path, no imageId)
-  if (!imageId && previewUrl?.startsWith("blob:")) {
-    const imgEl = el.querySelector(".bubble-body img");
-    if (imgEl) {
-      imgEl.onload  = () => URL.revokeObjectURL(previewUrl);
-      imgEl.onerror = () => URL.revokeObjectURL(previewUrl);
-    }
-  }
+  el.innerHTML = `<div class="avatar">🙋</div><div class="bubble"><div class="bubble-body">${attachHtml}${escHtml(text)}</div></div>`;
   $msgs.appendChild(el);
   scrollBottom();
 }
@@ -909,7 +929,8 @@ ctxBar.init();
 // ── Image upload (drag / paste) ───────────────────────────────────────────────
 // pendingImage stores only the server-assigned UUID + a blob preview URL.
 // Raw bytes live on the server after /upload — never as a base64 string in JS.
-let pendingImage = null; // { id: string|null, mime, previewUrl, name }
+let pendingImage   = null; // { id: string|null, mime, previewUrl, name }
+let pendingUploads = 0;   // count of in-flight uploads — button disabled while > 0
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
@@ -944,8 +965,14 @@ async function handleImageFile(file) {
   const previewUrl = URL.createObjectURL(file);
   const kb = Math.round(file.size / 1024);
 
-  // Show preview bar immediately with spinner + progress bar
-  pendingImage = { id: null, mime: file.type, previewUrl, name: file.name || "image" };
+  // Each concurrent upload owns its own object — no global overwrite race.
+  const myPending = { id: null, mime: file.type, previewUrl, name: file.name || "image" };
+  pendingImage = myPending; // last upload wins the preview bar (cosmetic only)
+
+  pendingUploads++;
+  $btn.disabled = true;
+
+  // Show preview bar for the last-started upload
   document.getElementById("img-preview-thumb").src = previewUrl;
   document.getElementById("img-preview-label").textContent = `${file.type} · ${kb} KB · đang upload…`;
   document.getElementById("img-thumb-overlay").style.display = "flex";
@@ -953,30 +980,31 @@ async function handleImageFile(file) {
   document.getElementById("img-progress-fill").style.width = "0%";
   document.getElementById("img-server-badge").style.display = "none";
   document.getElementById("img-preview-bar").style.display = "flex";
-  $btn.disabled = true;  // block send until upload done
 
   let imageId;
   try {
     imageId = await uploadWithProgress(file, pct => {
-      document.getElementById("img-progress-fill").style.width = `${Math.round(pct * 100)}%`;
+      // Only update progress bar if this upload is the one currently shown
+      if (pendingImage === myPending)
+        document.getElementById("img-progress-fill").style.width = `${Math.round(pct * 100)}%`;
     });
   } catch (err) {
     alert(`Upload lỗi: ${err.message}`);
     URL.revokeObjectURL(previewUrl);
-    pendingImage = null;
-    document.getElementById("img-preview-bar").style.display = "none";
-    $btn.disabled = false;
+    pendingUploads--;
+    if (pendingUploads === 0) $btn.disabled = false;
     return;
   }
 
-  // Upload done — update state and UI
-  pendingImage.id = imageId;
-  document.getElementById("img-progress-fill").style.width = "100%";
-  document.getElementById("img-thumb-overlay").style.display = "none";
-  document.getElementById("img-progress-track").style.display = "none";
-  document.getElementById("img-preview-label").textContent = `${file.type} · ${kb} KB`;
-  document.getElementById("img-server-badge").style.display = "inline";
-  $btn.disabled = false;
+  // Upload done — update MY object, not the global (avoids id overwrite by concurrent uploads)
+  myPending.id = imageId;
+  pendingUploads--;
+  if (pendingUploads === 0) {
+    $btn.disabled = false;
+    // All uploads done — hide the single-image progress bar (files are shown as cards below)
+    document.getElementById("img-preview-bar").style.display = "none";
+    pendingImage = null;
+  }
 
   // Add to files bar immediately so status is visible before sending
   if (!fileRegistry.some(f => f.id === imageId)) {
@@ -1029,22 +1057,42 @@ const FILE_ICON = mime =>
   : mime.startsWith("image/") ? "🖼️"
   : "📎";
 
+function buildFileCard(f, idx, removable) {
+  const isImg = (f.mime || "").startsWith("image/");
+  const sc = f.status === "read" ? " read" : f.status === "available" ? " available" : f.status === "uploading" ? " uploading" : "";
+  const rm = removable
+    ? `<button class="card-rm" onclick="event.stopPropagation();removeFileAt(${idx})" title="Xóa">✕</button>`
+    : "";
+  const foot = `<div class="card-foot" title="${escHtml(f.name)}">${escHtml(f.name)}</div>`;
+
+  if (isImg) {
+    const src = f.id ? `/image/${f.id}` : "";
+    const click = f.id ? `onclick="openLightbox('/image/${f.id}')"` : "";
+    return `<div class="file-card is-image${sc}" ${click}>
+      <img class="card-thumb" src="${escHtml(src)}" alt="${escHtml(f.name)}" loading="lazy">
+      ${rm}${foot}
+    </div>`;
+  }
+
+  const ext = (f.name.split(".").pop() || "FILE").slice(0, 6).toUpperCase();
+  return `<div class="file-card${sc}">
+    <div class="card-art">
+      <div class="doc-line" style="width:100%"></div>
+      <div class="doc-line" style="width:70%"></div>
+      <div class="doc-line" style="width:88%"></div>
+      <div class="doc-line" style="width:55%"></div>
+      <div class="doc-line" style="width:78%"></div>
+      <div class="card-type">${escHtml(ext)}</div>
+    </div>
+    ${rm}${foot}
+  </div>`;
+}
+
 function renderFilesBar() {
   const bar = document.getElementById("files-bar");
   if (fileRegistry.length === 0) { bar.style.display = "none"; return; }
   bar.style.display = "flex";
-  bar.innerHTML = fileRegistry.map((f, i) => {
-    const statusClass = f.status === "read" ? " read"
-                      : f.status === "uploading" ? " uploading"
-                      : f.status === "available" ? " available" : "";
-    const badge = f.status === "read" ? " ✓" : f.status === "available" ? " ●" : "";
-    const isImg = (f.mime || "").startsWith("image/");
-    const clickAttr = isImg && f.id ? ` onclick="openLightbox('/image/${f.id}')" style="cursor:zoom-in"` : "";
-    return `<div class="file-chip${statusClass}" title="${escHtml(f.name)} — ${f.size_kb}KB${isImg ? ' · click to preview' : ''}"${clickAttr}>
-      ${FILE_ICON(f.mime || '')} ${escHtml(f.name)}${badge}
-      <button class="rm-file" type="button" onclick="event.stopPropagation();removeFileAt(${i})" title="Xóa">✕</button>
-    </div>`;
-  }).join("");
+  bar.innerHTML = fileRegistry.map((f, i) => buildFileCard(f, i, true)).join("");
 }
 
 function removeFileAt(i) {
@@ -1101,9 +1149,8 @@ async function sendMessage(message) {
   $empty && $empty.remove();
   $aiLogo.remove(); // clear logo from previous turn
   ctxBar.newTurn();
-  const imgSnapshot   = pendingImage;                        // capture before clearPendingImage
-  const imgPreviewUrl = imgSnapshot?.previewUrl || null;
-  addUserBubble(message, imgPreviewUrl, imgSnapshot?.id);
+  const fileSnapshot = fileRegistry.map(f => ({...f}));  // snapshot before clearPendingImage
+  addUserBubble(message, fileSnapshot);
   showFlow("Supervisor đang phân tích...");
 
   const turns        = [];
@@ -1150,7 +1197,7 @@ async function sendMessage(message) {
   }
 
   try {
-    clearPendingImage();           // hides preview bar; blob URL revoked in addUserBubble.onload
+    clearPendingImage();
     const resp = await fetch("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1159,7 +1206,7 @@ async function sendMessage(message) {
         session_id: sessionId,
         history,
         file_registry: fileRegistry,
-        image_id: imgSnapshot?.id || "",
+        image_id: pendingImage?.id || "",  // backward-compat: single-image inline path
       }),
     });
     if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
@@ -1253,6 +1300,14 @@ async function sendMessage(message) {
                 item.classList.add("streaming");
                 const result = item.querySelector(".tool-result") || item.querySelector(".tool-body");
                 if (result) { result.textContent += data.text || ""; scrollBottom(); }
+                // Accumulate char count → approx token display
+                const chars = (data.text || "").length;
+                if (chars > 0) {
+                  item.dataset.tokChars = (+(item.dataset.tokChars || 0) + chars).toString();
+                  const approx = Math.round(+item.dataset.tokChars / 4);
+                  const tokEl = item.querySelector(".tool-tok");
+                  if (tokEl && !item.dataset.tokExact) tokEl.textContent = `~${approx} tok`;
+                }
               }
             }
             break;
@@ -1303,8 +1358,26 @@ async function sendMessage(message) {
             break;
 
           case "usage":
-            if (data.agent && data.prompt_tok != null)
+            if (data.agent && data.prompt_tok != null) {
               ctxBar.setRealUsage(data.agent, data.prompt_tok, data.completion_tok || 0);
+              // Update exact token count on the matching tool chip
+              if (curBubble) {
+                const agentToTool = { web_search: "web_search", vision_agent: "read_image" };
+                const toolName = agentToTool[data.agent];
+                if (toolName) {
+                  const items = curBubble.querySelectorAll(`.tool-item[data-tool-name="${toolName}"]`);
+                  // Use the most recently added chip that doesn't have exact count yet
+                  for (let i = items.length - 1; i >= 0; i--) {
+                    if (!items[i].dataset.tokExact) {
+                      items[i].dataset.tokExact = "1";
+                      const tokEl = items[i].querySelector(".tool-tok");
+                      if (tokEl) tokEl.textContent = `${data.completion_tok} tok`;
+                      break;
+                    }
+                  }
+                }
+              }
+            }
             break;
 
           case "done":
@@ -1326,17 +1399,7 @@ async function sendMessage(message) {
     history.push({ role: "user", content: message });
     for (const t of turns) history.push({ role: "model", content: t.content, name: t.agent });
 
-    // Persist image in fileRegistry after the turn so supervisor can reference it in future turns.
-    if (imgSnapshot?.id && !fileRegistry.some(f => f.id === imgSnapshot.id)) {
-      fileRegistry.push({
-        id:      imgSnapshot.id,
-        name:    imgSnapshot.name || ("image_" + imgSnapshot.id.slice(0, 8)),
-        mime:    imgSnapshot.mime || "image/jpeg",
-        size_kb: 0,
-        status:  "available",
-      });
-      renderFilesBar();
-    }
+    // fileRegistry already has all uploaded files (added in handleImageFile/handleDocFile).
 
   } catch (err) {
     hideFlow();

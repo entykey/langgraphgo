@@ -235,6 +235,21 @@ func chatHandler(g *graph.StateRunnable[AgentState]) http.HandlerFunc {
 		if req.ImageID != "" {
 			userContent += fmt.Sprintf("\n[Ảnh đính kèm — gọi read_image(file_id: \"%s\") để phân tích ảnh này]", req.ImageID)
 		}
+		// Append hints for ALL image files in registry not yet mentioned in
+		// userContent or in any prior history message — handles multi-image uploads.
+		historyText := ""
+		for _, m := range req.History {
+			historyText += m.Content
+		}
+		for _, fe := range fileRegistry {
+			if !strings.HasPrefix(fe.Mime, "image/") {
+				continue
+			}
+			if strings.Contains(userContent, fe.ID) || strings.Contains(historyText, fe.ID) {
+				continue
+			}
+			userContent += fmt.Sprintf("\n[Ảnh đính kèm: \"%s\" — gọi read_image(file_id: \"%s\") để phân tích]", fe.Name, fe.ID)
+		}
 		msgs = append(msgs, Message{Role: "user", Content: userContent})
 
 		// Langfuse trace for this turn

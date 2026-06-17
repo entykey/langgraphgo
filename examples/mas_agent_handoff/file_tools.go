@@ -71,7 +71,10 @@ Brief mờ nhạt = kết quả chung chung = user frustrated.`,
 
 			brief := parseBrief(args)
 			if brief.Task == "" {
-				return "Error: task_brief.task is required — provide a detailed task description"
+				brief.Task = "Phân tích và mô tả chi tiết toàn bộ nội dung trong ảnh"
+				brief.UserIntent = "Hiểu ảnh chứa gì và mô tả đầy đủ"
+				brief.OutputFormat = "Mô tả chi tiết các yếu tố chính: đối tượng, màu sắc, bố cục, văn bản nếu có"
+				brief.SuccessCriteria = []string{"Mô tả đầy đủ nội dung ảnh"}
 			}
 
 			fmt.Printf("[read_image] file_id=%s task=%s\n", fileID, truncate(brief.Task, 80))
