@@ -726,7 +726,8 @@ function addToolChip(bubble, name, query, fileId, task, intent) {
   body.appendChild(resultDiv);
 
   header.addEventListener("click", () => {
-    if (item.classList.contains("has-result")) item.classList.toggle("expanded");
+    if (item.classList.contains("has-result") || item.classList.contains("error"))
+      item.classList.toggle("expanded");
   });
 
   item.appendChild(header);
