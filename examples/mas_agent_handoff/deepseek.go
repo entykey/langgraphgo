@@ -198,7 +198,9 @@ func (c *DSClient) ChatWithTools(ctx context.Context, messages []dsChatMsg, tool
 // StreamChatWithTools streams one ReAct turn.
 // toolChoice: "required" forces a tool call (use on round 0); nil lets the model decide.
 // onToken is called for each text token when the response is a final answer.
-// Tool-call responses are accumulated silently and returned in full.
+// onToolDelta is called for each tool_call delta — name is non-empty only on the first delta
+// for that index; argChunk carries the incremental JSON argument fragment. Pass nil to disable.
+// Tool-call responses are also accumulated and returned in full via the returned message.
 // Returns (message, promptTokens, completionTokens, firstDelta, error).
 // firstDelta is set on the very first non-empty delta — text OR tool_call — for TTFT.
 func (c *DSClient) StreamChatWithTools(
@@ -207,6 +209,7 @@ func (c *DSClient) StreamChatWithTools(
 	tools []dsAPITool,
 	toolChoice any,
 	onToken func(string),
+	onToolDelta func(index int, name, argChunk string),
 ) (*dsChatMsg, int, int, time.Time, error) {
 	b, err := json.Marshal(dsReq{
 		Model:         dsModel,
@@ -276,7 +279,7 @@ func (c *DSClient) StreamChatWithTools(
 			firstDelta = time.Now()
 		}
 
-		// Accumulate tool call deltas unconditionally
+		// Accumulate tool call deltas and fire onToolDelta for early UI notification.
 		for _, tc := range delta.ToolCalls {
 			for int(tc.Index) >= len(toolCalls) {
 				toolCalls = append(toolCalls, dsToolCall{Type: "function"})
@@ -287,6 +290,9 @@ func (c *DSClient) StreamChatWithTools(
 			}
 			t.Function.Name += tc.Function.Name
 			t.Function.Arguments += tc.Function.Arguments
+			if onToolDelta != nil {
+				onToolDelta(tc.Index, tc.Function.Name, tc.Function.Arguments)
+			}
 		}
 
 		// Stream text tokens unconditionally (may be preamble before tools, or final answer)
@@ -327,7 +333,7 @@ func (c *DSClient) StreamReply(ctx context.Context, systemPrompt string, msgs []
 	resp, _, _, firstDelta, err := c.StreamChatWithTools(ctx, dsMsgs, nil, nil, func(tok string) {
 		sb.WriteString(tok)
 		onToken(tok)
-	})
+	}, nil)
 	if err != nil {
 		return "", time.Time{}, err
 	}

@@ -71,7 +71,7 @@ func jsonAgentNode(ds *DSClient) func(context.Context, AgentState) (AgentState, 
 			resp, promptTok, completionTok, firstDelta, err := ds.StreamChatWithTools(ctx, msgs, apiTools, toolChoice, func(tok string) {
 				emit(state.EventCh, "token", map[string]string{"text": tok})
 				didStream = true
-			})
+			}, nil)
 			if err != nil {
 				globalLF.GenerationEnd(genID, state.TraceID, map[string]any{"error": err.Error()}, promptTok, completionTok, time.Time{})
 				return state, fmt.Errorf("json_agent DeepSeek: %w", err)

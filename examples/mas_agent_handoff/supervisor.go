@@ -190,10 +190,23 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 			fmt.Sprintf("supervisor-reply-r%d", round+1), supervisorModel,
 			lfDSMsgs(dsMsgs, 8))
 
+		// toolStarted tracks which tool-call indices have already emitted tool_call_start,
+		// so we only emit once per tool even though name arrives in the first delta only.
+		toolStarted := make(map[int]bool)
+
 		resp, promptTok, completionTok, firstDelta, err := ds.StreamChatWithTools(
 			ctx, dsMsgs, wsAPITools, nil,
 			func(tok string) {
 				emit(state.EventCh, "token", map[string]string{"text": tok})
+			},
+			func(index int, name, argChunk string) {
+				if name != "" && !toolStarted[index] {
+					toolStarted[index] = true
+					emit(state.EventCh, "tool_call_start", map[string]any{"index": index, "name": name})
+				}
+				if argChunk != "" {
+					emit(state.EventCh, "tool_arg_chunk", map[string]any{"index": index, "chunk": argChunk})
+				}
 			},
 		)
 		if err != nil {
@@ -224,14 +237,14 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 			promptTok, completionTok, firstDelta)
 		dsMsgs = append(dsMsgs, *resp)
 
-		for _, tc := range resp.ToolCalls {
+		for i, tc := range resp.ToolCalls {
 			var args map[string]any
 			if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil {
 				args = map[string]any{}
 			}
 
 			brief := parseBrief(args)
-			toolEvt := map[string]string{"name": tc.Function.Name}
+			toolEvt := map[string]any{"name": tc.Function.Name, "index": i}
 			if q, _ := args["query"].(string); q != "" {
 				toolEvt["query"] = q
 			}

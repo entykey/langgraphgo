@@ -1329,8 +1329,68 @@ async function sendMessage(message) {
             break;
           }
 
+          case "tool_call_start": {
+            // Chip appears immediately when LLM first emits the function name delta.
+            ensureBubble();
+            hideInfobar(curBubble);
+            const earlyChip = addToolChip(curBubble, data.name, null, null, null, null);
+            if (earlyChip && data.index != null)
+              earlyChip.dataset.tcIndex = String(data.index);
+            break;
+          }
+
+          case "tool_arg_chunk": {
+            // Stream partial args → extract query/task string as it builds up live.
+            if (!curBubble || data.index == null) break;
+            const earlyItem = [...(curBubble.querySelectorAll('.tool-item.loading') || [])]
+              .find(el => el.dataset.tcIndex === String(data.index));
+            if (!earlyItem) break;
+            earlyItem.dataset.partialArgs = (earlyItem.dataset.partialArgs || '') + (data.chunk || '');
+            const partial = earlyItem.dataset.partialArgs;
+            // Match the value of "query" or "task" key as it streams in (before closing quote).
+            const m = partial.match(/"(?:query|task)"\s*:\s*"([^"]*)/);
+            if (m && m[1]) {
+              const liveLabel = earlyItem.querySelector('.tool-label');
+              if (liveLabel) {
+                const name = earlyItem.dataset.toolName;
+                const prefix = name === 'web_search' ? '🌐 ' : '⚙️ ';
+                liveLabel.textContent = prefix + m[1] + '…';
+              }
+            }
+            break;
+          }
+
           case "tool_call": {
             ensureBubble();
+            // If tool_call_start already created a chip for this index, update it in-place.
+            let item = null;
+            if (data.index != null) {
+              item = [...(curBubble.querySelectorAll('.tool-item.loading') || [])]
+                .find(el => el.dataset.tcIndex === String(data.index)) || null;
+            }
+            if (item) {
+              // Update metadata on pre-created chip.
+              if (data.query)   item.dataset.query  = data.query;
+              if (data.file_id) item.dataset.fileId = data.file_id;
+              if (data.task)    item.dataset.task   = data.task;
+              if (data.intent)  item.dataset.intent = data.intent;
+              // Finalize label using same logic as addToolChip.
+              const lbl = item.querySelector('.tool-label');
+              if (lbl) {
+                if (data.task) {
+                  lbl.textContent = data.task;
+                } else if (data.name === 'web_search' && data.query) {
+                  lbl.textContent = `🌐 "${data.query}"`;
+                } else if ((data.name === 'read_image' || data.name === 'read_file') && data.file_id) {
+                  const fe = fileRegistry.find(f => f.id === data.file_id);
+                  const fname = fe?.name || (data.name === 'read_image' ? 'ảnh' : 'file');
+                  lbl.textContent = data.name === 'read_image' ? `🖼️ ${fname}` : `📄 ${fname}`;
+                }
+              }
+            } else {
+              // Fallback: no early chip (e.g. json_agent path) — create normally.
+              addToolChip(curBubble, data.name, data.query, data.file_id, data.task, data.intent);
+            }
             let infoText;
             if (data.task) {
               infoText = `⚙️ ${data.task}...`;
@@ -1346,7 +1406,6 @@ async function sendMessage(message) {
               infoText = `🔧 ${data.name}()...`;
             }
             setInfobar(curBubble, infoText);
-            addToolChip(curBubble, data.name, data.query, data.file_id, data.task, data.intent);
             break;
           }
 
