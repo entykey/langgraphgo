@@ -798,6 +798,18 @@ function finishBubble(bubble, agent, citations, ttft, reasoning) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function scrollBottom() { $msgs.scrollTop = $msgs.scrollHeight; }
+
+// findToolItem returns the chip matching (name, index) inside bubble.
+// extraSelector filters further (e.g. ".loading"). Falls back to FIFO when index is null.
+function findToolItem(bubble, name, index, extraSelector) {
+  const sel = `.tool-item[data-tool-name="${name}"]${extraSelector || ""}`;
+  const all = [...bubble.querySelectorAll(sel)];
+  if (index != null) {
+    const byIdx = all.find(el => el.dataset.tcIndex === String(index));
+    if (byIdx) return byIdx;
+  }
+  return all[0] || null;
+}
 function escHtml(s) { return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function setInputDisabled(v) { $input.disabled = v; $btn.disabled = v; }
 function fillInput(el) { $input.value = el.textContent; $input.focus(); }
@@ -1420,8 +1432,7 @@ async function sendMessage(message) {
           case "citations": {
             curCitations = data.count || 0;
             if (curBubble) {
-              const items = curBubble.querySelectorAll(".tool-item[data-tool-name='web_search'].loading");
-              const item = items[0]; // FIFO
+              const item = findToolItem(curBubble, "web_search", data.index, ".loading");
               if (item) {
                 const q = item.dataset.query;
                 item.querySelector(".tool-label").textContent = q
@@ -1435,13 +1446,11 @@ async function sendMessage(message) {
 
           case "tool_stream": {
             if (curBubble) {
-              const items = curBubble.querySelectorAll(`.tool-item[data-tool-name="${data.name}"].loading`);
-              const item = items[0]; // FIFO
+              const item = findToolItem(curBubble, data.name, data.index, ".loading");
               if (item) {
                 item.classList.add("streaming");
                 const result = item.querySelector(".tool-result") || item.querySelector(".tool-body");
                 if (result) { result.textContent += data.text || ""; scrollBottom(); }
-                // Accumulate char count → approx token display
                 const chars = (data.text || "").length;
                 if (chars > 0) {
                   item.dataset.tokChars = (+(item.dataset.tokChars || 0) + chars).toString();
@@ -1456,8 +1465,7 @@ async function sendMessage(message) {
 
           case "tool_result": {
             if (curBubble) {
-              const items = curBubble.querySelectorAll(`.tool-item[data-tool-name="${data.name}"].loading`);
-              const item = items[0]; // FIFO
+              const item = findToolItem(curBubble, data.name, data.index, ".loading");
               if (item) {
                 const resultText = data.result || "";
                 const isError = resultText.startsWith("Error") || resultText.startsWith("[TOOL ERROR]");
@@ -1465,7 +1473,6 @@ async function sendMessage(message) {
                 item.classList.add(isError ? "error" : "has-result");
                 const result = item.querySelector(".tool-result") || item.querySelector(".tool-body");
                 if (result) result.textContent = resultText;
-                // Update file registry status when a file tool completes
                 const fid = item.dataset.fileId;
                 if (fid) {
                   const entry = fileRegistry.find(f => f.id === fid);
@@ -1501,20 +1508,24 @@ async function sendMessage(message) {
           case "usage":
             if (data.agent && data.prompt_tok != null) {
               ctxBar.setRealUsage(data.agent, data.prompt_tok, data.completion_tok || 0);
-              // Update exact token count on the matching tool chip
               if (curBubble) {
                 const agentToTool = { web_search: "web_search", vision_agent: "read_image" };
                 const toolName = agentToTool[data.agent];
                 if (toolName) {
-                  const items = curBubble.querySelectorAll(`.tool-item[data-tool-name="${toolName}"]`);
-                  // Use the most recently added chip that doesn't have exact count yet
-                  for (let i = items.length - 1; i >= 0; i--) {
-                    if (!items[i].dataset.tokExact) {
-                      items[i].dataset.tokExact = "1";
-                      const tokEl = items[i].querySelector(".tool-tok");
-                      if (tokEl) tokEl.textContent = `${data.completion_tok} tok`;
-                      break;
+                  // Prefer index-based match; fall back to reverse-FIFO for paths without index.
+                  let targetItem = data.index != null
+                    ? findToolItem(curBubble, toolName, data.index, null)
+                    : null;
+                  if (!targetItem) {
+                    const all = curBubble.querySelectorAll(`.tool-item[data-tool-name="${toolName}"]`);
+                    for (let i = all.length - 1; i >= 0; i--) {
+                      if (!all[i].dataset.tokExact) { targetItem = all[i]; break; }
                     }
+                  }
+                  if (targetItem && !targetItem.dataset.tokExact) {
+                    targetItem.dataset.tokExact = "1";
+                    const tokEl = targetItem.querySelector(".tool-tok");
+                    if (tokEl) tokEl.textContent = `${data.completion_tok} tok`;
                   }
                 }
               }

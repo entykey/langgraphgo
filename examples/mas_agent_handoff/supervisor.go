@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -159,16 +160,55 @@ func supervisorNode(backend SupervisorBackend, gemini *GeminiClient) func(contex
 	}
 }
 
+// indexedProxy is a per-tool-invocation event channel that forwards events to dst
+// while injecting "index" into tool_stream, usage, and citations payloads.
+// This lets the frontend route interleaved events to the correct chip when tools run in parallel.
+type indexedProxy struct {
+	ch   chan SSEEvent
+	done chan struct{}
+}
+
+func newIndexedProxy(dst chan<- SSEEvent, toolIdx int) *indexedProxy {
+	p := &indexedProxy{ch: make(chan SSEEvent, 128), done: make(chan struct{})}
+	go func() {
+		defer close(p.done)
+		for ev := range p.ch {
+			switch ev.Type {
+			case "tool_stream", "usage", "citations":
+				switch d := ev.Data.(type) {
+				case map[string]string:
+					m := make(map[string]any, len(d)+1)
+					for k, v := range d {
+						m[k] = v
+					}
+					m["index"] = toolIdx
+					ev.Data = m
+				case map[string]any:
+					d["index"] = toolIdx
+				}
+			}
+			dst <- ev
+		}
+	}()
+	return p
+}
+
+// closeAndWait closes the proxy channel and waits for the forwarding goroutine to drain,
+// ensuring all tool_stream events are delivered to dst before the caller emits tool_result.
+func (p *indexedProxy) closeAndWait() {
+	close(p.ch)
+	<-p.done
+}
+
 // supervisorReplyWithTools runs a DeepSeek ReAct loop with web_search, read_image,
 // and read_file available as tools. Uses toolsMap dispatch (same pattern as json_agent).
 func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClient, gemini *GeminiClient, spanID string) (AgentState, error) {
-	wsTool := makeWebSearchTool(ctx, gemini, state.EventCh)
-	readImgTool := makeReadImageTool(ctx, gemini, state.EventCh)
-	readFileTool := makeReadFileTool(ctx, state.EventCh)
-
-	allTools := []ToolDef{wsTool, readImgTool, readFileTool}
-	wsAPITools := buildAPITools(allTools)
-	tmap := toolsMap(allTools)
+	// API tool schemas for the LLM (channel doesn't matter — schemas only, Fn never called here).
+	wsAPITools := buildAPITools([]ToolDef{
+		makeWebSearchTool(ctx, gemini, state.EventCh),
+		makeReadImageTool(ctx, gemini, state.EventCh),
+		makeReadFileTool(ctx, state.EventCh),
+	})
 
 	systemPrompt := supervisorChatPrompt + buildFileContext(state.FileRegistry)
 
@@ -237,52 +277,83 @@ func supervisorReplyWithTools(ctx context.Context, state AgentState, ds *DSClien
 			promptTok, completionTok, firstDelta)
 		dsMsgs = append(dsMsgs, *resp)
 
+		// Execute tool calls in parallel — DeepSeek decides which calls are independent.
+		// Each goroutine gets its own indexedProxy so tool_stream/usage/citations events
+		// carry the correct index for frontend routing.
+		type toolExecResult struct {
+			tc     dsToolCall
+			result string
+		}
+		execResults := make([]toolExecResult, len(resp.ToolCalls))
+		var wg sync.WaitGroup
+
 		for i, tc := range resp.ToolCalls {
-			var args map[string]any
-			if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil {
-				args = map[string]any{}
-			}
+			wg.Add(1)
+			go func(i int, tc dsToolCall) {
+				defer wg.Done()
 
-			brief := parseBrief(args)
-			toolEvt := map[string]any{"name": tc.Function.Name, "index": i}
-			if q, _ := args["query"].(string); q != "" {
-				toolEvt["query"] = q
-			}
-			if fid, _ := args["file_id"].(string); fid != "" {
-				toolEvt["file_id"] = fid
-			}
-			if brief.Task != "" {
-				toolEvt["task"] = brief.Task
-			}
-			if brief.UserIntent != "" {
-				toolEvt["intent"] = brief.UserIntent
-			}
-			emit(state.EventCh, "tool_call", toolEvt)
-			fmt.Printf("[supervisor] tool: %s(%s)\n", tc.Function.Name, truncate(tc.Function.Arguments, 120))
+				var args map[string]any
+				if json.Unmarshal([]byte(tc.Function.Arguments), &args) != nil {
+					args = map[string]any{}
+				}
 
-			toolSpanID := lfUUID()
-			globalLF.SpanStart(toolSpanID, state.TraceID, spanID, tc.Function.Name,
-				map[string]any{"args": tc.Function.Arguments})
+				brief := parseBrief(args)
+				toolEvt := map[string]any{"name": tc.Function.Name, "index": i}
+				if q, _ := args["query"].(string); q != "" {
+					toolEvt["query"] = q
+				}
+				if fid, _ := args["file_id"].(string); fid != "" {
+					toolEvt["file_id"] = fid
+				}
+				if brief.Task != "" {
+					toolEvt["task"] = brief.Task
+				}
+				if brief.UserIntent != "" {
+					toolEvt["intent"] = brief.UserIntent
+				}
+				emit(state.EventCh, "tool_call", toolEvt)
+				fmt.Printf("[supervisor] tool[%d]: %s(%s)\n", i, tc.Function.Name, truncate(tc.Function.Arguments, 120))
 
-			def, ok := tmap[tc.Function.Name]
-			var result string
-			if !ok {
-				result = fmt.Sprintf("Unknown tool: %s", tc.Function.Name)
-			} else {
-				result = def.Fn(args)
-			}
+				toolSpanID := lfUUID()
+				globalLF.SpanStart(toolSpanID, state.TraceID, spanID, tc.Function.Name,
+					map[string]any{"args": tc.Function.Arguments})
 
-			globalLF.SpanEnd(toolSpanID, state.TraceID,
-				map[string]any{"result": truncate(result, 300)})
-			emit(state.EventCh, "tool_result", map[string]string{
-				"name":   tc.Function.Name,
-				"result": result,
-			})
+				// Fresh tool instances bound to a per-invocation indexed proxy.
+				proxy := newIndexedProxy(state.EventCh, i)
+				var result string
+				switch tc.Function.Name {
+				case "web_search":
+					result = makeWebSearchTool(ctx, gemini, proxy.ch).Fn(args)
+				case "read_image":
+					result = makeReadImageTool(ctx, gemini, proxy.ch).Fn(args)
+				case "read_file":
+					result = makeReadFileTool(ctx, proxy.ch).Fn(args)
+				default:
+					result = fmt.Sprintf("Unknown tool: %s", tc.Function.Name)
+				}
 
+				// Drain proxy before emitting tool_result so stream events arrive first.
+				proxy.closeAndWait()
+
+				globalLF.SpanEnd(toolSpanID, state.TraceID,
+					map[string]any{"result": truncate(result, 300)})
+				emit(state.EventCh, "tool_result", map[string]any{
+					"name":   tc.Function.Name,
+					"result": result,
+					"index":  i,
+				})
+
+				execResults[i] = toolExecResult{tc: tc, result: result}
+			}(i, tc)
+		}
+		wg.Wait()
+
+		// Append results in original index order — DeepSeek requires ToolCallID ordering.
+		for _, r := range execResults {
 			dsMsgs = append(dsMsgs, dsChatMsg{
 				Role:       "tool",
-				Content:    strPtr(result),
-				ToolCallID: tc.ID,
+				Content:    strPtr(r.result),
+				ToolCallID: r.tc.ID,
 			})
 		}
 	}
