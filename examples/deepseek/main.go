@@ -1,12 +1,13 @@
 // DeepSeek HTTP Spy (Go) — raw net/http, no SDK.
 // Direct port of deepseek_spy.py with added resource-usage benchmarking.
 //
-// Run from repo root:
+// Run from the examples/ directory:
 //
-//	go run ./examples/deepseek                  # non-stream + stream, thinking disabled
-//	go run ./examples/deepseek thinking         # thinking ON vs OFF comparison
-//	go run ./examples/deepseek tool_calls       # streaming tool-call delta analysis (T0/T1/T2)
-//	go run ./examples/deepseek load [N]         # N concurrent streams + resource stats (default 8)
+//	go run ./deepseek                           # non-stream + stream, thinking disabled
+//	go run ./deepseek thinking                  # thinking ON vs OFF comparison
+//	go run ./deepseek tool_calls                # streaming tool-call delta analysis (T0/T1/T2)
+//	go run ./deepseek load [N]                  # N concurrent streams + resource stats (default 8)
+//	go run ./deepseek load 8 --silent           # suppress verbose output, show only summaries
 package main
 
 import (
@@ -16,6 +17,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -30,8 +32,66 @@ const (
 
 var (
 	apiKey     string
+	silent     bool
 	httpClient = &http.Client{} // shared, no global timeout
 )
+
+// ── .env loading ──────────────────────────────────────────────────────────────
+
+func loadDotEnvFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		kv := strings.SplitN(line, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		k := strings.TrimSpace(kv[0])
+		raw := kv[1]
+		if i := strings.Index(raw, " #"); i >= 0 {
+			raw = raw[:i]
+		}
+		v := strings.Trim(strings.TrimSpace(raw), `"'`)
+		if os.Getenv(k) == "" {
+			os.Setenv(k, v) //nolint:errcheck
+		}
+	}
+	return true
+}
+
+func loadDotEnv() {
+	if cwd, err := os.Getwd(); err == nil {
+		if loadDotEnvFile(filepath.Join(cwd, ".env")) {
+			return
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		if loadDotEnvFile(filepath.Join(filepath.Dir(exe), ".env")) {
+			return
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		dir := cwd
+		for i := 0; i < 4; i++ {
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+			if loadDotEnvFile(filepath.Join(dir, ".env")) {
+				return
+			}
+		}
+	}
+}
 
 // ── pretty-print helpers ──────────────────────────────────────────────────────
 
@@ -127,12 +187,14 @@ func (s memSnap) print() {
 // ── spy: non-streaming ────────────────────────────────────────────────────────
 
 func spyNonStream(payload map[string]any) {
-	hdr("NON-STREAMING CALL")
-	section("→ REQUEST")
-	fmt.Printf("  POST %s\n", apiURL)
-	fmt.Printf("  Authorization: Bearer %s\n", redactedKey())
-	fmt.Printf("  Content-Type: application/json\n\n  BODY:\n")
-	pJSON(payload)
+	if !silent {
+		hdr("NON-STREAMING CALL")
+		section("→ REQUEST")
+		fmt.Printf("  POST %s\n", apiURL)
+		fmt.Printf("  Authorization: Bearer %s\n", redactedKey())
+		fmt.Printf("  Content-Type: application/json\n\n  BODY:\n")
+		pJSON(payload)
+	}
 
 	t0 := time.Now()
 	resp, err := doRequest(payload, false)
@@ -143,9 +205,11 @@ func spyNonStream(payload map[string]any) {
 	}
 	defer resp.Body.Close()
 
-	section(fmt.Sprintf("← RESPONSE  HTTP %d  [%.3fs]", resp.StatusCode, elapsed.Seconds()))
-	for k, vs := range resp.Header {
-		fmt.Printf("  %s: %s\n", k, strings.Join(vs, ", "))
+	if !silent {
+		section(fmt.Sprintf("← RESPONSE  HTTP %d  [%.3fs]", resp.StatusCode, elapsed.Seconds()))
+		for k, vs := range resp.Header {
+			fmt.Printf("  %s: %s\n", k, strings.Join(vs, ", "))
+		}
 	}
 
 	var body map[string]any
@@ -153,8 +217,10 @@ func spyNonStream(payload map[string]any) {
 		fmt.Printf("[ERR] decode: %v\n", err)
 		return
 	}
-	fmt.Printf("\n  BODY:\n")
-	pJSON(body)
+	if !silent {
+		fmt.Printf("\n  BODY:\n")
+		pJSON(body)
+	}
 
 	choices, _ := body["choices"].([]any)
 	if len(choices) == 0 {
@@ -174,21 +240,27 @@ func spyNonStream(payload map[string]any) {
 	} else {
 		fmt.Printf("  [OK] No reasoning_content — thinking is OFF\n")
 	}
-	fmt.Printf("\n  [OK] Answer: %s\n", content)
+	if !silent {
+		fmt.Printf("\n  [OK] Answer: %s\n", content)
+	}
 }
 
 // ── spy: streaming SSE ────────────────────────────────────────────────────────
 
 func spyStream(payload map[string]any) {
-	hdr("STREAMING CALL (SSE)")
+	if !silent {
+		hdr("STREAMING CALL (SSE)")
+	}
 	p := copyMap(payload)
 	p["stream"] = true
 
-	section("→ REQUEST")
-	fmt.Printf("  POST %s\n", apiURL)
-	fmt.Printf("  Authorization: Bearer %s\n", redactedKey())
-	fmt.Printf("  Content-Type: application/json\n  Accept: text/event-stream\n\n  BODY:\n")
-	pJSON(p)
+	if !silent {
+		section("→ REQUEST")
+		fmt.Printf("  POST %s\n", apiURL)
+		fmt.Printf("  Authorization: Bearer %s\n", redactedKey())
+		fmt.Printf("  Content-Type: application/json\n  Accept: text/event-stream\n\n  BODY:\n")
+		pJSON(p)
+	}
 
 	t0 := time.Now()
 	resp, err := doRequest(p, true)
@@ -198,12 +270,14 @@ func spyStream(payload map[string]any) {
 	}
 	defer resp.Body.Close()
 
-	section("<- RESPONSE  (SSE events)")
-	fmt.Printf("  HTTP %d\n", resp.StatusCode)
-	for k, vs := range resp.Header {
-		fmt.Printf("  %s: %s\n", k, strings.Join(vs, ", "))
+	if !silent {
+		section("<- RESPONSE  (SSE events)")
+		fmt.Printf("  HTTP %d\n", resp.StatusCode)
+		for k, vs := range resp.Header {
+			fmt.Printf("  %s: %s\n", k, strings.Join(vs, ", "))
+		}
+		fmt.Printf("\n  SSE STREAM (each event pretty-printed):\n\n")
 	}
-	fmt.Printf("\n  SSE STREAM (each event pretty-printed):\n\n")
 
 	var (
 		content    strings.Builder
@@ -223,17 +297,23 @@ func spyStream(payload map[string]any) {
 			continue
 		}
 		if line == "data: [DONE]" {
-			fmt.Printf("  data: [DONE]\n")
+			if !silent {
+				fmt.Printf("  data: [DONE]\n")
+			}
 			continue
 		}
 		if !strings.HasPrefix(line, "data: ") {
-			fmt.Printf("  %s\n", line)
+			if !silent {
+				fmt.Printf("  %s\n", line)
+			}
 			continue
 		}
 
 		var data map[string]any
 		if err := json.Unmarshal([]byte(line[6:]), &data); err != nil {
-			fmt.Printf("  %s\n", line)
+			if !silent {
+				fmt.Printf("  %s\n", line)
+			}
 			continue
 		}
 
@@ -261,14 +341,16 @@ func spyStream(payload map[string]any) {
 			}
 		}
 
-		pretty := fmtJSON(data)
-		fmt.Printf("  -- event #%d  +%.0fms %s\n", eventCount, elapsedMs, strings.Repeat("-", 30))
-		for _, pline := range strings.Split(pretty, "\n") {
-			marker := "     "
-			if strings.Contains(pline, `"delta"`) || strings.Contains(pline, `"content"`) {
-				marker = "  >>  "
+		if !silent {
+			pretty := fmtJSON(data)
+			fmt.Printf("  -- event #%d  +%.0fms %s\n", eventCount, elapsedMs, strings.Repeat("-", 30))
+			for _, pline := range strings.Split(pretty, "\n") {
+				marker := "     "
+				if strings.Contains(pline, `"delta"`) || strings.Contains(pline, `"content"`) {
+					marker = "  >>  "
+				}
+				fmt.Printf("%s%s\n", marker, pline)
 			}
-			fmt.Printf("%s%s\n", marker, pline)
 		}
 	}
 
@@ -349,8 +431,10 @@ func demoToolCalls() {
 		}},
 	}
 
-	section("→ REQUEST (tool_choice=required forces tool call)")
-	pJSON(payload)
+	if !silent {
+		section("→ REQUEST (tool_choice=required forces tool call)")
+		pJSON(payload)
+	}
 
 	t0 := time.Now()
 	resp, err := doRequest(payload, true)
@@ -360,8 +444,10 @@ func demoToolCalls() {
 	}
 	defer resp.Body.Close()
 
-	section("<- RESPONSE  (SSE events — focus on tool_calls deltas)")
-	fmt.Printf("  HTTP %d\n\n", resp.StatusCode)
+	if !silent {
+		section("<- RESPONSE  (SSE events — focus on tool_calls deltas)")
+		fmt.Printf("  HTTP %d\n\n", resp.StatusCode)
+	}
 
 	// Per-index tool-call state
 	type tcState struct {
@@ -390,7 +476,9 @@ func demoToolCalls() {
 			continue
 		}
 		if line == "data: [DONE]" {
-			fmt.Printf("\n  data: [DONE]\n")
+			if !silent {
+				fmt.Printf("\n  data: [DONE]\n")
+			}
 			continue
 		}
 		if !strings.HasPrefix(line, "data: ") {
@@ -399,7 +487,9 @@ func demoToolCalls() {
 
 		var data map[string]any
 		if err := json.Unmarshal([]byte(line[6:]), &data); err != nil {
-			fmt.Printf("  %s\n", line)
+			if !silent {
+				fmt.Printf("  %s\n", line)
+			}
 			continue
 		}
 
@@ -409,10 +499,12 @@ func demoToolCalls() {
 		// usage-only chunk (no choices)
 		choices, _ := data["choices"].([]any)
 		if len(choices) == 0 {
-			if usage, ok := data["usage"].(map[string]any); ok {
-				fmt.Printf("  -- event #%d  +%.0fms  [usage] prompt=%.0f completion=%.0f\n",
-					eventCount, elapsedMs,
-					usage["prompt_tokens"], usage["completion_tokens"])
+			if !silent {
+				if usage, ok := data["usage"].(map[string]any); ok {
+					fmt.Printf("  -- event #%d  +%.0fms  [usage] prompt=%.0f completion=%.0f\n",
+						eventCount, elapsedMs,
+						usage["prompt_tokens"], usage["completion_tokens"])
+				}
 			}
 			continue
 		}
@@ -423,7 +515,7 @@ func demoToolCalls() {
 		contentStr, _ := delta["content"].(string)
 		tcDeltas, _ := delta["tool_calls"].([]any)
 
-		if contentStr != "" {
+		if !silent && contentStr != "" {
 			fmt.Printf("  -- event #%d  +%.0fms  [content preamble]  %q\n", eventCount, elapsedMs, contentStr)
 		}
 
@@ -457,21 +549,23 @@ func demoToolCalls() {
 				st.nChunks++
 			}
 
-			var idPart, namePart, argsPart string
-			if tid != "" {
-				idPart = fmt.Sprintf(" id=%q", tid)
+			if !silent {
+				var idPart, namePart, argsPart string
+				if tid != "" {
+					idPart = fmt.Sprintf(" id=%q", tid)
+				}
+				if tcName != "" {
+					namePart = fmt.Sprintf(" name=%q", tcName)
+				}
+				if tcArgs != "" {
+					argsPart = fmt.Sprintf(" args_chunk=%q", tcArgs)
+				}
+				fmt.Printf("  -- event #%d  +%.0fms  [tool_calls idx=%d]%s%s%s\n",
+					eventCount, elapsedMs, idx, idPart, namePart, argsPart)
 			}
-			if tcName != "" {
-				namePart = fmt.Sprintf(" name=%q", tcName)
-			}
-			if tcArgs != "" {
-				argsPart = fmt.Sprintf(" args_chunk=%q", tcArgs)
-			}
-			fmt.Printf("  -- event #%d  +%.0fms  [tool_calls idx=%d]%s%s%s\n",
-				eventCount, elapsedMs, idx, idPart, namePart, argsPart)
 		}
 
-		if finish != "" {
+		if !silent && finish != "" {
 			fmt.Printf("  -- event #%d  +%.0fms  finish_reason=%q\n", eventCount, elapsedMs, finish)
 		}
 	}
@@ -609,7 +703,9 @@ func demoLoad(n int) {
 			elapsed := time.Since(tReq)
 			mu.Lock()
 			totalTokens += toks
-			results = append(results, fmt.Sprintf("  [worker %02d]  tokens=%-4d  time=%.2fs", id, toks, elapsed.Seconds()))
+			if !silent {
+				results = append(results, fmt.Sprintf("  [worker %02d]  tokens=%-4d  time=%.2fs", id, toks, elapsed.Seconds()))
+			}
 			mu.Unlock()
 		}(i)
 	}
@@ -680,19 +776,31 @@ func demoThinkingComparison() {
 // ── main ──────────────────────────────────────────────────────────────────────
 
 func main() {
+	loadDotEnv()
+
 	apiKey = os.Getenv("DEEPSEEK_API_KEY")
 	if apiKey == "" {
 		fmt.Fprintln(os.Stderr, "[ERR] DEEPSEEK_API_KEY not set")
 		os.Exit(1)
 	}
 
+	// strip --silent / -s from args before mode parsing
+	var args []string
+	for _, a := range os.Args[1:] {
+		if a == "--silent" || a == "-s" {
+			silent = true
+		} else {
+			args = append(args, a)
+		}
+	}
+
 	mode := "default"
-	if len(os.Args) > 1 {
-		mode = os.Args[1]
+	if len(args) > 0 {
+		mode = args[0]
 	}
 	n := 8
-	if len(os.Args) > 2 {
-		if v, err := strconv.Atoi(os.Args[2]); err == nil && v > 0 {
+	if len(args) > 1 {
+		if v, err := strconv.Atoi(args[1]); err == nil && v > 0 {
 			n = v
 		}
 	}
