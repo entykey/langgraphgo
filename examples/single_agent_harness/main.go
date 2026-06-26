@@ -40,6 +40,7 @@ func main() {
 
 	initLangfuse()
 	initMinio()
+	initCodeExec()
 
 	geminiClient = NewGeminiClient(mustEnv("GOOGLE_API_KEY"), _searchModel)
 	dsClient = NewDSClient(mustEnv("DEEPSEEK_API_KEY"), _agentModel)

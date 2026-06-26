@@ -1,0 +1,27 @@
+FROM python:3.11-slim
+
+# Unicode/emoji fonts for matplotlib
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends fontconfig fonts-noto fonts-symbola && \
+    rm -rf /var/lib/apt/lists/* && \
+    fc-cache -fv
+
+# Fixed package set — rebuild image when new libs are needed.
+# Do NOT install packages at runtime via pip inside the container.
+RUN pip install --no-cache-dir \
+    pandas==2.2.3 \
+    openpyxl==3.1.5 \
+    matplotlib==3.9.2 \
+    numpy==2.1.3 \
+    python-docx==1.1.2 \
+    pdfminer.six==20240706 \
+    Pillow==11.0.0 \
+    xlrd==2.0.1 \
+    requests==2.32.3
+
+# Non-root user — reduces blast radius on container escape
+RUN useradd -m -u 1000 sandboxuser
+USER sandboxuser
+WORKDIR /tmp
+
+# No ENTRYPOINT — the Go server passes the command via docker run args

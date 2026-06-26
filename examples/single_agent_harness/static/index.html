@@ -836,8 +836,14 @@ function fileTypeIcon(ext) {
 
 function createArtifactCard(bubble, data) {
   const { id, filename, mime, size, line_count } = data;
+  // Dedup: remove any previous card for the same artifact or same filename
+  // in this bubble so "present_file" replaces the auto-export card in-place.
+  bubble.querySelectorAll(".artifact-card").forEach(c => {
+    if (c.dataset.artId === id || c.dataset.filename === filename) c.remove();
+  });
   const card = document.createElement("div");
   card.className = "artifact-card";
+  card.dataset.filename = filename;
   card.dataset.artId = id;
   const icon = mimeIcon(mime || "", filename || "file");
   const lang = mimeToHlLang(mime || "", filename || "file");

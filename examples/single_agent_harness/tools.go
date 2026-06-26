@@ -147,9 +147,17 @@ func makeCoreTools(
 		},
 	}
 
+	// binaryExts are file extensions that must NOT be written via write_file.
+	// Binary files are produced by run_code (auto-exported) — never by text write.
+	binaryExts := map[string]bool{
+		"png": true, "jpg": true, "jpeg": true, "gif": true, "webp": true,
+		"pdf": true, "xlsx": true, "xls": true, "docx": true, "doc": true,
+		"zip": true, "tar": true, "gz": true, "mp4": true, "mp3": true,
+	}
+
 	writeFile := ToolDef{
 		Name:        "write_file",
-		Description: "Write or update a text file in the session. The file is AUTOMATICALLY presented to the user.",
+		Description: "Write or update a TEXT file in the session. For binary outputs (PNG, PDF, Excel…) use run_code and save to /tmp — they are exported automatically.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"content":{"type":"string"}},"required":["filename","content"]}`),
 		Fn: func(args map[string]any) string {
 			filename, _ := args["filename"].(string)
@@ -158,6 +166,17 @@ func makeCoreTools(
 				return "Error: filename required"
 			}
 			filename = filepath.Base(filename) // sanitize path
+			ext := ""
+			if dot := strings.LastIndex(filename, "."); dot >= 0 {
+				ext = strings.ToLower(filename[dot+1:])
+			}
+			if binaryExts[ext] {
+				return fmt.Sprintf(
+					"Error: '%s' is a binary file type — do NOT use write_file for it. "+
+						"Binary files (PNG, PDF, Excel…) are created by run_code and auto-exported "+
+						"when saved to /tmp. Use present_file('%s') to re-present an existing file.",
+					filename, filename)
+			}
 			mime := guessMime(filename)
 			art := putArtifact(sessionID, filename, []byte(content), mime)
 			emitFilePresent(eventCh, art)
@@ -168,7 +187,7 @@ func makeCoreTools(
 
 	listWorkspace := ToolDef{
 		Name:        "list_workspace",
-		Description: "List all files currently in the session (written by the agent).",
+		Description: "List all files currently in the session (written by the agent or exported from run_code).",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 		Fn: func(_ map[string]any) string {
 			arts := listArtifacts(sessionID)
@@ -183,7 +202,52 @@ func makeCoreTools(
 		},
 	}
 
-	return []ToolDef{loadSkill, webSearch, readImage, writeFile, listWorkspace}
+	presentFile := ToolDef{
+		Name:        "present_file",
+		Description: "Re-present an existing session file to the user (e.g. show a chart or document again). Use when user asks to 'show again' or 'present' a file that was already created.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string","description":"Filename to re-present"}},"required":["filename"]}`),
+		Fn: func(args map[string]any) string {
+			filename, _ := args["filename"].(string)
+			if filename == "" {
+				return "Error: filename required"
+			}
+			filename = filepath.Base(filename)
+			art := getArtifact(sessionID, filename)
+			if art == nil {
+				arts := listArtifacts(sessionID)
+				var names []string
+				for _, a := range arts {
+					names = append(names, a.Filename)
+				}
+				if len(names) == 0 {
+					return fmt.Sprintf("File '%s' not found. Session has no files.", filename)
+				}
+				return fmt.Sprintf("File '%s' not found. Available: %s", filename, strings.Join(names, ", "))
+			}
+			emitFilePresent(eventCh, art)
+			return fmt.Sprintf("✅ Re-presented '%s' (v%d, %dB).", art.Filename, art.Version, len(art.Content))
+		},
+	}
+
+	runCode := ToolDef{
+		Name:        "run_code",
+		Description: "Execute code in an isolated Docker sandbox and return stdout + stderr. Preloaded: pandas, openpyxl, matplotlib, numpy, python-docx, pdfminer, Pillow. Files written to /tmp are automatically exported as artifacts.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"language":{"type":"string","enum":["python","bash"],"description":"python or bash"},"code":{"type":"string","description":"Full source code to execute"}},"required":["language","code"]}`),
+		Fn: func(args map[string]any) string {
+			language, _ := args["language"].(string)
+			code, _ := args["code"].(string)
+			if code == "" {
+				return "Error: code is required"
+			}
+			if language == "" {
+				language = "python"
+			}
+			fmt.Printf("[run_code] lang=%s (%d chars)\n", language, len(code))
+			return executeCode(ctx, language, code, sessionID, eventCh)
+		},
+	}
+
+	return []ToolDef{loadSkill, webSearch, readImage, writeFile, listWorkspace, presentFile, runCode}
 }
 
 // emitFilePresent sends file_present + artifact_content SSE events.

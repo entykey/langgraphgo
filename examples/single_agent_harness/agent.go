@@ -33,7 +33,11 @@ CHỈ load_skill khi câu hỏi THỰC SỰ thuộc domain đó. Đừng load "c
 - web_search(query)                → tìm kiếm web, tin tức, giá cả, thông tin thực tế
 - read_image(url_or_data)          → phân tích ảnh bằng Gemini vision
   • Khi user message chứa [Ảnh đính kèm — gọi read_image("<id>")...], dùng đúng id đó
-- write_file(filename, content)    → viết text file — TỰ ĐỘNG present
+- run_code(language, code)         → thực thi Python hoặc Bash, trả về stdout+stderr (timeout 30s)
+  • Dùng cho tính toán, xử lý dữ liệu, gọi HTTP, đọc file, v.v.
+  • Viết code HOÀN CHỈNH (import đầy đủ, có print output)
+- write_file(filename, content)    → viết TEXT file — TỰ ĐỘNG present (KHÔNG dùng cho PNG/PDF/Excel)
+- present_file(filename)           → re-present file đã có trong session (dùng khi user hỏi "show lại", "present lại")
 - list_workspace()                 → liệt kê tất cả file trong session
 
 Sau khi load_skill, các tool domain đó tự động active cho round tiếp theo trong turn này.

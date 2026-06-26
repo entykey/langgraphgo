@@ -1,0 +1,364 @@
+// agent_lc_experiment.go — proof-of-concept: replace raw DSClient with langchaingo openai.LLM
+//
+// This file is intentionally NOT compiled (.txt suffix).
+// It shows what the langchaingo port would look like and documents the compromises.
+//
+// HOW TO ACTIVATE:
+//   1. rename to agent_lc_experiment.go
+//   2. remove agent.go and deepseek.go (or rename to .txt)
+//   3. go run ./single_agent_harness/
+//
+// VERDICT: see TRADEOFF section at bottom.
+
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/tmc/langchaingo/llms"
+	"github.com/tmc/langchaingo/llms/openai"
+)
+
+// ── langchaingo LLM init ──────────────────────────────────────────────────────
+
+// newLangchaingoLLM creates an openai.LLM pointed at DeepSeek's API.
+// Drop-in for DSClient when used with GenerateContent.
+func newLangchaingoLLM(apiKey, model string) (*openai.LLM, error) {
+	return openai.New(
+		openai.WithModel(model),
+		openai.WithBaseURL("https://api.deepseek.com/v1"),
+		openai.WithToken(apiKey),
+	)
+}
+
+// ── Message conversion ────────────────────────────────────────────────────────
+
+// dsToLC converts our dsChatMsg slice to langchaingo's MessageContent slice.
+// This is lossy: dsChatMsg.ToolCalls uses a custom struct; we must convert.
+func dsToLC(msgs []dsChatMsg) []llms.MessageContent {
+	out := make([]llms.MessageContent, 0, len(msgs))
+	for _, m := range msgs {
+		switch m.Role {
+		case "system":
+			out = append(out, llms.TextParts(llms.ChatMessageTypeSystem, deref(m.Content)))
+		case "user":
+			out = append(out, llms.TextParts(llms.ChatMessageTypeHuman, deref(m.Content)))
+		case "assistant":
+			parts := []llms.ContentPart{}
+			if m.Content != nil && *m.Content != "" {
+				parts = append(parts, llms.TextContent{Text: *m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				parts = append(parts, llms.ToolCall{
+					ID:   tc.ID,
+					Type: "function",
+					FunctionCall: &llms.FunctionCall{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				})
+			}
+			out = append(out, llms.MessageContent{Role: llms.ChatMessageTypeAI, Parts: parts})
+		case "tool":
+			out = append(out, llms.MessageContent{
+				Role: llms.ChatMessageTypeTool,
+				Parts: []llms.ContentPart{
+					llms.ToolCallResponse{
+						ToolCallID: m.ToolCallID,
+						Name:       "",
+						Content:    deref(m.Content),
+					},
+				},
+			})
+		}
+	}
+	return out
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// ── Tool conversion ───────────────────────────────────────────────────────────
+
+func toolDefsToLC(defs []ToolDef) []llms.Tool {
+	out := make([]llms.Tool, len(defs))
+	for i, d := range defs {
+		var params any
+		_ = json.Unmarshal(d.Parameters, &params)
+		out[i] = llms.Tool{
+			Type: "function",
+			Function: &llms.FunctionDefinition{
+				Name:        d.Name,
+				Description: d.Description,
+				Parameters:  params,
+			},
+		}
+	}
+	return out
+}
+
+// ── runAgentTurn via langchaingo ──────────────────────────────────────────────
+//
+// COMPROMISE #1 — tool_arg_chunk SSE events:
+//   Raw HTTP: onToolDelta(idx, name, argChunk) called per-delta, giving us
+//             {"index":0,"chunk":"partial_json_arg"} SSE immediately.
+//   langchaingo: StreamingFunc(ctx, chunk []byte) receives json.Marshal(delta)
+//             where delta = []*ToolCall with partial Function.Arguments.
+//             We CAN parse this, but it's fragile (see parseToolDelta below).
+//             We CANNOT get the tool name on argument deltas (name only comes
+//             in the first delta for each tool, type="" on subsequent deltas).
+//
+// COMPROMISE #2 — TTFT measurement:
+//   Raw HTTP: firstDelta = time.Now() inside the streaming goroutine, exact.
+//   langchaingo: must measure from before GenerateContent call and track
+//             whether we've seen the first callback yet.
+//
+// COMPROMISE #3 — Content + ToolCalls simultaneously:
+//   Raw HTTP: we track both contentBuf and toolCalls independently; if a
+//             round has both text and tool calls (e.g. reasoning text + tool
+//             invocation) both are preserved.
+//   langchaingo: ContentChoice.Content holds the text, ToolCalls holds tools.
+//             This part actually works the same.
+//
+// ADVANTAGE — less code:
+//   We no longer maintain dsClient.StreamChatWithTools or SSE scanner.
+//   Langchaingo handles HTTP, retry, response parsing.
+
+func runAgentTurnLC(
+	ctx context.Context,
+	llm *openai.LLM,
+	sessionID string,
+	traceID string,
+	history []messageJSON,
+	eventCh chan<- SSEEvent,
+) string {
+	activeSkills := getSessionSkills(sessionID)
+
+	toolMap := map[string]ToolDef{}
+	tmRef := &toolMap
+	core := makeCoreTools(ctx, sessionID, activeSkills, tmRef, eventCh)
+	for _, t := range core {
+		toolMap[t.Name] = t
+	}
+	for skill := range activeSkills {
+		for _, t := range skillToolsMap[skill] {
+			toolMap[t.Name] = t
+		}
+	}
+
+	msgs := make([]dsChatMsg, 0, len(history)+1)
+	msgs = append(msgs, dsChatMsg{Role: "system", Content: strPtr(rootAgentSystem)})
+	for _, m := range history {
+		role := m.Role
+		if role == "model" {
+			role = "assistant"
+		}
+		msgs = append(msgs, dsChatMsg{Role: role, Content: strPtr(m.Content)})
+	}
+
+	spanID := lfUUID()
+	lastUser := ""
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "user" {
+			lastUser = history[i].Content
+			break
+		}
+	}
+	globalLF.SpanStart(spanID, traceID, "", "root_agent", map[string]any{"query": truncate(lastUser, 300)})
+
+	var fullText string
+	var toolsCalled []string
+
+	for round := 0; round < maxReActRounds; round++ {
+		fmt.Printf("[agent-lc] round %d session=%s skills=%v\n", round+1, sessionID[:8], activeSkillsList(activeSkills))
+
+		activeDefs := activeToolDefs(toolMap)
+		lcTools := toolDefsToLC(activeDefs)
+		lcMsgs := dsToLC(msgs)
+
+		genID := lfUUID()
+		globalLF.GenerationStart(genID, traceID, spanID,
+			fmt.Sprintf("round-%d", round+1), _agentModel,
+			lfDSMsgs(msgs, 10))
+
+		// COMPROMISE #2: measure TTFT manually.
+		var firstDelta time.Time
+		prevArgsByIdx := map[int]string{} // track tool arg deltas to compute chunks
+
+		nameEmitted := map[int]bool{}
+
+		resp, err := llm.GenerateContent(ctx, lcMsgs,
+			llms.WithTools(lcTools),
+			llms.WithTemperature(0.3),
+			llms.WithStreamingFunc(func(_ context.Context, chunk []byte) error {
+				if firstDelta.IsZero() && len(chunk) > 0 {
+					firstDelta = time.Now() // COMPROMISE #2: not as precise — measured from callback, not from HTTP byte
+				}
+
+				// COMPROMISE #1: distinguish text vs tool call delta.
+				// langchaingo passes json.Marshal(delta []*ToolCall) for tool deltas.
+				var toolDeltas []struct {
+					Index    int    `json:"index"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				}
+				if json.Unmarshal(chunk, &toolDeltas) == nil && len(toolDeltas) > 0 {
+					// It's a tool call delta.
+					for _, td := range toolDeltas {
+						idx := td.Index
+						if td.Function.Name != "" && !nameEmitted[idx] {
+							nameEmitted[idx] = true
+							emit(eventCh, "tool_call_start", map[string]any{"name": td.Function.Name, "index": idx})
+						}
+						// Compute just the NEW arg chars (delta = current - previous).
+						prev := prevArgsByIdx[idx]
+						newArgs := td.Function.Arguments
+						if len(newArgs) > len(prev) {
+							argChunk := newArgs[len(prev):]
+							emit(eventCh, "tool_arg_chunk", map[string]any{"index": idx, "chunk": argChunk})
+							prevArgsByIdx[idx] = newArgs
+						}
+					}
+					return nil
+				}
+
+				// It's a text token.
+				tok := string(chunk)
+				if tok != "" {
+					emit(eventCh, "token", map[string]string{"text": tok})
+				}
+				return nil
+			}),
+		)
+		if err != nil {
+			globalLF.GenerationEnd(genID, traceID, map[string]any{"error": err.Error()}, 0, 0, time.Time{})
+			globalLF.SpanEnd(spanID, traceID, map[string]any{"error": err.Error(), "tools_called": toolsCalled})
+			if ctx.Err() != nil {
+				return fullText
+			}
+			emit(eventCh, "error", map[string]string{"message": err.Error()})
+			return fullText
+		}
+
+		if len(resp.Choices) == 0 {
+			break
+		}
+		choice := resp.Choices[0]
+
+		// Token usage: available in GenerationInfo (no separate return values).
+		promptTok, _ := choice.GenerationInfo["PromptTokens"].(int)
+		completionTok, _ := choice.GenerationInfo["CompletionTokens"].(int)
+
+		assistantOut := map[string]any{"role": "assistant", "content": ""}
+		if choice.Content != "" {
+			assistantOut["content"] = truncate(choice.Content, 3000)
+		} else if len(choice.ToolCalls) > 0 {
+			names := make([]string, len(choice.ToolCalls))
+			for i, tc := range choice.ToolCalls {
+				names[i] = tc.FunctionCall.Name
+			}
+			assistantOut["content"] = fmt.Sprintf("[tool calls: %v]", names)
+		}
+		globalLF.GenerationEnd(genID, traceID, assistantOut, promptTok, completionTok, firstDelta)
+
+		emit(eventCh, "usage", map[string]any{
+			"agent": "root", "prompt_tok": promptTok, "completion_tok": completionTok,
+		})
+
+		// Convert choice back to dsChatMsg for history.
+		assistantMsg := dsChatMsg{Role: "assistant"}
+		if choice.Content != "" {
+			assistantMsg.Content = strPtr(choice.Content)
+		}
+		for _, tc := range choice.ToolCalls {
+			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, dsToolCall{
+				ID:   tc.ID,
+				Type: "function",
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{
+					Name:      tc.FunctionCall.Name,
+					Arguments: tc.FunctionCall.Arguments,
+				},
+			})
+		}
+		msgs = append(msgs, assistantMsg)
+
+		if len(choice.ToolCalls) == 0 {
+			fullText = choice.Content
+			break
+		}
+
+		// Convert tool calls to dsToolCall for execToolsParallel.
+		dsTCs := make([]dsToolCall, len(choice.ToolCalls))
+		for i, tc := range choice.ToolCalls {
+			dsTCs[i] = dsToolCall{
+				ID:   tc.ID,
+				Type: "function",
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{
+					Name:      tc.FunctionCall.Name,
+					Arguments: tc.FunctionCall.Arguments,
+				},
+			}
+		}
+
+		results := execToolsParallel(dsTCs, toolMap, eventCh, traceID, spanID)
+		for _, r := range results {
+			msgs = append(msgs, dsChatMsg{
+				Role:       "tool",
+				Content:    strPtr(r.result),
+				ToolCallID: r.id,
+			})
+			if !contains(toolsCalled, r.name) {
+				toolsCalled = append(toolsCalled, r.name)
+			}
+		}
+	}
+
+	globalLF.SpanEnd(spanID, traceID, map[string]any{
+		"answer":       truncate(fullText, 300),
+		"tools_called": toolsCalled,
+	})
+	if len(toolsCalled) > 0 {
+		emit(eventCh, "tools_done", map[string]any{"tools": toolsCalled})
+	}
+	return fullText
+}
+
+// ── TRADEOFF SUMMARY ──────────────────────────────────────────────────────────
+//
+// Feature                  Raw HTTP (current)                 langchaingo
+// ───────────────────────────────────────────────────────────────────────────
+// Text streaming           onToken(string) — clean            StreamingFunc([]byte) — same content
+// tool_call_start SSE      onToolDelta(idx, name, "")          parsed from json.Marshal(delta) — works but fragile
+// tool_arg_chunk SSE       onToolDelta(idx, "", argChunk)      diff against prevArgsByIdx — works but O(n) string compare
+// TTFT measurement         exact (inside SSE scanner)         approximate (first StreamingFunc callback)
+// DeepSeek "thinking" mode noThinkDS() in request body        no way to set thinking=disabled via langchaingo options
+// Token usage              returned with response             buried in GenerationInfo map[string]any
+// Code to maintain         deepseek.go (~300 lines)           0 lines — langchaingo handles HTTP
+// Langfuse integration     manual (current code)              CallbacksHandler, but still manual for tool spans
+//
+// VERDICT: The tool_arg_chunk hack (prevArgsByIdx diff) is O(argument length) per
+// delta and requires JSON parsing every streaming callback. For a 2KB tool argument,
+// that's ~50-100 JSON parses with string diffs. It works but costs CPU per token.
+//
+// The "thinking=disabled" flag cannot be set via langchaingo — it would require
+// forking openaillm.go or sending via metadata (not forwarded to API).
+//
+// Recommendation: keep raw HTTP. The performance, streaming granularity, and
+// DeepSeek-specific flag control are worth the 300 lines of deepseek.go.
