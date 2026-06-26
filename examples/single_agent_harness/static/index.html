@@ -1,0 +1,1836 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>🤝 MAS Lab — Python</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #f2f3f5;
+    --surface:  #ffffff;
+    --surface2: #ebedef;
+    --border:   #c4c9d0;
+    --text:     #2e3338;
+    --muted:    #747f8d;
+    --accent:   #f97316;
+    --radius:   12px;
+    --font:     -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono:     "JetBrains Mono", "Fira Code", monospace;
+  }
+
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 15px; }
+  .layout { display: flex; flex-direction: column; height: 100vh; max-width: 860px; margin: 0 auto; }
+
+  /* Header */
+  .header { padding: 16px 20px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .header h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .config-bar { font-size: 12px; color: var(--muted); }
+  .config-bar span { color: var(--accent); }
+
+  /* Messages */
+  .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .messages::-webkit-scrollbar { width: 4px; }
+  .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* Inline flow indicator */
+  .flow-indicator {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 8px; color: var(--muted); font-size: 12px;
+  }
+
+  /* Message row — no avatars */
+  .msg { display: flex; gap: 0; }
+  .msg.user { justify-content: flex-end; }
+  .avatar { display: none; }
+
+  /* AI bubble: full width, no card background */
+  .msg.ai .bubble { max-width: 100%; }
+  .bubble { max-width: 72%; }
+
+  /* ── Bubble anatomy ───────────────────────────────────────────────────────── */
+  .bubble-infobar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 0;
+    background: transparent;
+    border-bottom: none;
+    font-size: 12px; color: var(--muted);
+  }
+  .bubble-infobar.hidden { display: none; }
+
+  .bubble-content { background: transparent; }
+  .bubble-meta:empty ~ * { display: none; }
+
+  .content-text {
+    padding: 4px 0;
+    line-height: 1.7; word-break: break-word;
+  }
+  .content-text:empty { display: none; }
+
+  .content-tools {
+    display: flex; flex-direction: column; gap: 4px;
+    padding: 6px 0;
+  }
+
+  /* shimmer sweep */
+  @keyframes shimmer {
+    0%   { background-position: -300% center; }
+    100% { background-position: 300% center; }
+  }
+
+  .tool-item {
+    border-radius: 7px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    font-size: 13px; font-family: var(--mono);
+  }
+  .tool-item.loading .tool-header {
+    color: #b45309;
+    background: rgba(180,83,9,.07);
+  }
+  .tool-item.loading .tool-header::before {
+    content: "";
+    display: inline-block;
+    width: 9px; height: 9px;
+    border: 1.5px solid rgba(180,83,9,.25);
+    border-top-color: #b45309;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    flex-shrink: 0;
+  }
+  .tool-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 10px;
+    background: rgba(249,115,22,.08);
+    color: #c2410c;
+    cursor: default;
+    user-select: none;
+  }
+  .tool-item.loading  .tool-header { cursor: pointer; }
+  .tool-item.streaming .tool-header { cursor: pointer; }
+  .tool-item.has-result .tool-header {
+    cursor: pointer;
+    color: #15803d;
+    background: rgba(21,128,61,.07);
+  }
+  .tool-item.has-result .tool-header::before {
+    content: "✓";
+    color: #15803d;
+    font-size: 10px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .tool-item.has-result .tool-header:hover { background: rgba(21,128,61,.12); }
+  .tool-item.error .tool-header {
+    cursor: pointer;
+    color: #dc2626;
+    background: rgba(220,38,38,.07);
+  }
+  .tool-item.error .tool-header::before {
+    content: "✕";
+    color: #dc2626;
+    font-size: 10px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .tool-item.error .tool-header:hover { background: rgba(220,38,38,.12); }
+  .tool-item.error .tool-chevron { display: inline; }
+  .tool-item.error .tool-result { color: #b91c1c; }
+  .tool-label { flex: 1; }
+  .tool-tok {
+    font-size: 10px; font-family: var(--mono);
+    color: #b45309; opacity: .75;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .tool-item.has-result .tool-tok { color: #15803d; }
+  .tool-item.error     .tool-tok { color: #dc2626; }
+  .tool-chevron {
+    opacity: .5; font-size: 9px;
+    transition: transform .2s;
+    display: none;
+  }
+  .tool-item.loading   .tool-chevron,
+  .tool-item.has-result .tool-chevron,
+  .tool-item.error     .tool-chevron,
+  .tool-item.streaming .tool-chevron { display: inline; }
+  .tool-item.expanded .tool-chevron { transform: rotate(180deg); }
+
+  @keyframes text-shimmer {
+    0%   { background-position: 80% center; }
+    100% { background-position: 20% center; }
+  }
+  .tool-item.loading .tool-label {
+    background: linear-gradient(
+      90deg,
+      #c2410c 0%, #c2410c 45%,
+      #fb923c 48%, #fef3c7 50%, #fb923c 52%,
+      #c2410c 55%, #c2410c 100%
+    );
+    background-size: 600% auto;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: text-shimmer 1.4s ease-in-out infinite;
+  }
+
+  .tool-body {
+    display: none;
+    flex-direction: column;
+    border-top: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .tool-item.expanded .tool-body,
+  .tool-item.loading.streaming .tool-body { display: flex; }
+
+  .tool-meta {
+    display: none;
+    padding: 5px 10px;
+    background: rgba(249,115,22,.04);
+    border-bottom: 1px solid var(--border);
+    font-size: 10px; color: #6b7280;
+    grid-template-columns: auto 1fr; gap: 1px 8px;
+    line-height: 1.4;
+  }
+  .tool-item.expanded .tool-meta { display: grid; }
+  .tool-meta dt { color: #9ca3af; font-size: 9px; text-transform: uppercase; letter-spacing: .3px; align-self: start; padding-top: 1px; }
+  .tool-meta dd { color: #4b5563; margin: 0; word-break: break-word; }
+
+  .tool-result {
+    padding: 8px 10px;
+    background: var(--surface2);
+    font-size: 10.5px; color: #4b5563;
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 240px; overflow-y: auto;
+    line-height: 1.5; flex: 1;
+  }
+
+  /* Artifact file card */
+  .artifact-card {
+    margin: 6px 0;
+    border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+    background: var(--surface2);
+  }
+  .artifact-card-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; cursor: pointer;
+    border-bottom: 1px solid transparent; transition: background .15s;
+  }
+  .artifact-card-header:hover { background: rgba(0,0,0,.04); }
+  .artifact-card.open .artifact-card-header { border-bottom-color: var(--border); }
+  .artifact-icon { font-size: 16px; flex-shrink: 0; }
+  .artifact-name { font-family: var(--mono); font-size: 12px; color: var(--text); font-weight: 500; flex: 1; }
+  .artifact-meta-info { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .artifact-toggle { font-size: 10px; color: var(--muted); transition: transform .15s; flex-shrink: 0; }
+  .artifact-card.open .artifact-toggle { transform: rotate(180deg); }
+  .artifact-download {
+    font-size: 11px; color: var(--accent); text-decoration: none;
+    background: rgba(249,115,22,.08); border: 1px solid rgba(249,115,22,.2);
+    border-radius: 4px; padding: 2px 7px; flex-shrink: 0;
+  }
+  .artifact-download:hover { background: rgba(249,115,22,.15); }
+  .artifact-preview { display: none; }
+  .artifact-preview pre { margin: 0; padding: 12px; overflow-x: auto; font-size: 12px; border-radius: 0; }
+  .artifact-card.open .artifact-preview { display: block; }
+
+  /* Markdown styles */
+  .content-text p  { margin: 0 0 .6em; }
+  .content-text p:last-child { margin-bottom: 0; }
+  .content-text h1,.content-text h2,.content-text h3 { margin: .8em 0 .3em; font-size: 1em; font-weight: 600; }
+  .content-text ul,.content-text ol { padding-left: 1.4em; margin: .4em 0; }
+  .content-text li { margin: .15em 0; }
+  .content-text pre { background: var(--surface2); border-radius: 6px; padding: 10px; overflow-x: auto; margin: .6em 0; }
+  .content-text code { font-family: var(--mono); font-size: .85em; }
+  .content-text p > code { background: var(--surface2); padding: 1px 5px; border-radius: 4px; }
+  .content-text table { border-collapse: collapse; width: 100%; margin: .6em 0; font-size: .9em; }
+  .content-text th { background: var(--surface2); font-weight: 600; }
+  .content-text th,.content-text td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  .content-text tr:nth-child(even) td { background: rgba(0,0,0,.03); }
+  .content-text a { color: var(--accent); }
+  .content-text strong { font-weight: 600; }
+
+  /* meta row */
+  .bubble-meta {
+    background: transparent;
+    border-radius: 0;
+    padding: 6px 0 2px;
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  }
+  .bubble-meta:empty { padding: 0; }
+
+  /* user bubble */
+  .msg.user .bubble-body {
+    padding: 10px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: var(--radius);
+    line-height: 1.6; word-break: break-word;
+    box-shadow: 0 1px 2px rgba(0,0,0,.06);
+  }
+
+  /* badges */
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; color: var(--muted);
+    background: var(--surface2); border-radius: 20px; padding: 2px 8px;
+  }
+  .badge.agent-root_agent  { color: #6d28d9; }
+  .badge.ttft { color: #374151; font-family: var(--mono); letter-spacing: -.3px; }
+  .badge.reasoning { color: #4b5563; font-style: italic; max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+
+  /* AI logo singleton */
+  .ai-logo {
+    display: block; width: 32px; height: 32px;
+    color: var(--accent); opacity: .55;
+    margin: 4px 0 8px 0;
+    transition: opacity .4s;
+  }
+  .ai-logo svg { display: block; width: 32px; height: 32px; }
+  .ai-logo.generating {
+    opacity: 1;
+    animation: ai-think 1s ease-in-out infinite;
+  }
+  .ai-logo.streaming {
+    opacity: .8;
+    animation: spin 2.4s linear infinite;
+  }
+  @keyframes ai-think {
+    0%,100% { transform: rotate(0deg) scale(1);    opacity: .8; }
+    50%      { transform: rotate(180deg) scale(1.2); opacity: 1; }
+  }
+
+  /* streaming cursor */
+  .cursor::after { content: "▋"; animation: blink .7s step-end infinite; color: var(--accent); }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* thinking dots */
+  .thinking-dots { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+  .thinking-dots span {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
+    animation: tdot 1.2s ease-in-out infinite;
+  }
+  .thinking-dots span:nth-child(2) { animation-delay: .2s; }
+  .thinking-dots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes tdot { 0%,60%,100%{transform:translateY(0);opacity:.35} 30%{transform:translateY(-5px);opacity:1} }
+
+  .spinner { width: 11px; height: 11px; border: 1.5px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; flex-shrink: 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Attachment bar */
+  .attachment-bar {
+    display: none; align-items: center; gap: 10px;
+    padding: 6px 20px 4px; flex-shrink: 0;
+    border-top: 1px solid var(--border);
+    background: rgba(249,115,22,.03);
+  }
+  .attachment-bar.visible { display: flex; }
+  .attachment-preview { position: relative; flex-shrink: 0; }
+  #attachment-thumb {
+    width: 52px; height: 52px; border-radius: 6px;
+    object-fit: cover; border: 1px solid var(--border); display: block;
+  }
+  #attachment-remove {
+    position: absolute; top: -5px; right: -5px;
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #dc2626; color: #fff; border: none; font-size: 9px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    line-height: 1; padding: 0;
+  }
+  #attachment-remove:hover { background: #b91c1c; }
+  .attachment-hint { font-size: 11px; color: var(--muted); }
+
+  /* Non-image file attachment card */
+  .att-file-card {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 5px 10px; font-size: 12px; font-family: var(--mono);
+  }
+  .att-file-name {
+    max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--text); font-weight: 500;
+  }
+  .att-file-card .att-remove {
+    width: 16px; height: 16px; border-radius: 50%;
+    background: #dc2626; color: #fff; border: none; font-size: 9px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; line-height: 1; padding: 0;
+  }
+  .att-file-card .att-remove:hover { background: #b91c1c; }
+
+  /* Attach-file button (📎) */
+  .attach-btn {
+    display: flex; align-items: center; justify-content: center;
+    width: 40px; height: 40px; border-radius: var(--radius);
+    background: var(--surface2); border: 1px solid var(--border);
+    cursor: pointer; font-size: 18px; flex-shrink: 0;
+    transition: background .15s; line-height: 1; user-select: none;
+  }
+  .attach-btn:hover { background: var(--border); }
+
+  /* Drag overlay */
+  .drag-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(249,115,22,.10);
+    border: 2px dashed var(--accent); border-radius: var(--radius);
+    z-index: 1000; align-items: center; justify-content: center; pointer-events: none;
+  }
+  .drag-overlay.active { display: flex; }
+  .drag-overlay-inner {
+    font-size: 18px; color: var(--accent);
+    background: var(--surface); border-radius: var(--radius);
+    padding: 18px 32px; box-shadow: 0 4px 20px rgba(0,0,0,.15);
+  }
+
+  /* Input */
+  .input-area { padding: 12px 20px 20px; flex-shrink: 0; display: flex; gap: 10px; }
+  .input-area input {
+    flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--text); padding: 10px 16px; font-size: 14px; font-family: var(--font);
+    outline: none; transition: border-color .15s;
+  }
+  .input-area input:focus { border-color: var(--accent); }
+  .input-area button {
+    background: var(--accent); color: #fff; border: none; border-radius: var(--radius);
+    padding: 10px 20px; font-size: 14px; cursor: pointer; font-weight: 500; transition: opacity .15s;
+    white-space: nowrap;
+  }
+  .input-area button:disabled { opacity: .45; cursor: not-allowed; }
+  #stop-btn { background: #dc2626; display: none; }
+  #stop-btn:hover { background: #b91c1c; }
+  .compact-btn {
+    background: var(--surface2); color: var(--muted); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 10px 14px; font-size: 13px; cursor: pointer;
+    font-weight: 500; transition: background .15s, color .15s; white-space: nowrap; flex-shrink: 0;
+  }
+  .compact-btn:hover:not(:disabled) { background: var(--border); color: var(--text); }
+  .compact-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* System message (compact result, info notices) */
+  .sys-msg {
+    display: flex; justify-content: center; padding: 2px 0;
+  }
+  .sys-msg-inner {
+    font-size: 11.5px; color: var(--muted); background: var(--surface2);
+    border: 1px solid var(--border); border-radius: 20px;
+    padding: 3px 12px; font-family: var(--mono); letter-spacing: -.1px;
+  }
+
+  /* Compact progress bubble */
+  .compact-progress {
+    margin: 10px 20px; padding: 14px 16px;
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 12px;
+    font-size: 13px; color: var(--muted);
+  }
+  .compact-progress-msg { margin-bottom: 10px; line-height: 1.5; }
+  .compact-progress-track {
+    height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;
+  }
+  .compact-progress-fill {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #8b5cf6, #6366f1);
+    border-radius: 3px; transition: width 0.25s ease;
+  }
+  @keyframes compact-shimmer {
+    0%   { background-position: -200% center; }
+    100% { background-position:  200% center; }
+  }
+  .compact-progress-fill.indeterminate {
+    width: 40% !important;
+    background: linear-gradient(90deg, transparent, #8b5cf6, #6366f1, transparent);
+    background-size: 200% 100%;
+    animation: compact-shimmer 1.4s infinite linear;
+  }
+
+  /* Empty state */
+  .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 14px; }
+  .empty-state h2 { font-size: 24px; color: var(--text); }
+  .empty-state .hints { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }
+  .hint-chip {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 20px;
+    padding: 5px 12px; font-size: 12px; cursor: pointer; transition: border-color .15s;
+  }
+  .hint-chip:hover { border-color: var(--accent); color: var(--text); }
+
+  /* Context window panel */
+  .ctx-panel { border-top: 1px solid var(--border); padding: 7px 20px 9px; flex-shrink: 0; font-size: 11px; }
+  .ctx-header {
+    display: flex; align-items: center; justify-content: space-between;
+    cursor: pointer; user-select: none; margin-bottom: 6px;
+  }
+  .ctx-title { color: var(--muted); font-family: var(--mono); letter-spacing: -.2px; }
+  .ctx-toggle { color: var(--muted); font-size: 10px; }
+  .ctx-agent-row {
+    margin-bottom: 8px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .ctx-agent-row:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+  .ctx-agent-label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-family: var(--mono); margin-bottom: 4px; font-size: 11px;
+  }
+  .ctx-bar-track {
+    height: 8px; background: var(--surface2); border-radius: 4px;
+    overflow: hidden; display: flex; margin-bottom: 4px; gap: 1px;
+  }
+  .ctx-seg { height: 100%; transition: width .25s ease; flex-shrink: 0; }
+  .ctx-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .ctx-legend-item {
+    display: inline-flex; align-items: center; gap: 5px;
+    color: var(--muted); font-family: var(--mono);
+  }
+  .ctx-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+  .ctx-val { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <header class="header">
+    <h1>🤝 Single-Agent Harness — Python</h1>
+    <div class="config-bar" id="config-bar">Đang tải...</div>
+  </header>
+
+  <div class="messages" id="messages">
+    <div class="empty-state" id="empty-state">
+      <h2>🤖</h2>
+      <div>Hỏi bất cứ điều gì — agent sẽ tự khám phá skill phù hợp khi cần</div>
+      <div class="hints">
+        <span class="hint-chip" onclick="fillInput(this)">user id 1 todo đầu tiên là gì ? trả lời ngắn gọn 1 dòng, reasonming trước khi gọi tool</span>
+        <span class="hint-chip" onclick="fillInput(this)">Danh sách tất cả users?</span>
+        <span class="hint-chip" onclick="fillInput(this)">User 5 có bao nhiêu todos và đã xong bao nhiêu?</span>
+        <span class="hint-chip" onclick="fillInput(this)">Post 3 có những comments gì?</span>
+        <span class="hint-chip" onclick="fillInput(this)">Hôm nay giá vàng và giá Bitcoin là bao nhiêu?</span>
+        <span class="hint-chip" onclick="fillInput(this)">Xin chào, tôi là Tuấn</span>
+        <span class="hint-chip" onclick="fillInput(this)">Viết code Python tính số nguyên tố từ 1 đến 100 bằng Sieve of Eratosthenes, chạy thử và xuất kết quả ra file primes.txt</span>
+        <span class="hint-chip" onclick="fillInput(this)">Tạo file CSV chứa bảng cửu chương từ 1 đến 9, có header "Phép nhân,Kết quả"</span>
+        <span class="hint-chip" onclick="fillInput(this)">Tạo file html chứa bảng cửu chương từ 2 đến 9, có header "Phép nhân,Kết quả"</span>
+        <span class="hint-chip" onclick="fillInput(this)">Viết script Python vẽ đồ thị sin và cos từ 0 đến 2π bằng matplotlib, lưu thành file PNG</span>
+        <span class="hint-chip" onclick="fillInput(this)">Tìm 5 user có nhiều todos nhất trong JSONPlaceholder, tính tỷ lệ hoàn thành của từng người</span>
+        <span class="hint-chip" onclick="fillInput(this)">Tin tức AI mới nhất hôm nay là gì? Tóm tắt 3 điểm nổi bật</span>
+        <span class="hint-chip" onclick="fillInput(this)">Viết Python benchmark so sánh tốc độ list comprehension vs for loop vs map() với 1 triệu phần tử</span>
+        <span class="hint-chip" onclick="fillInput(this)">Tạo biểu đồ tròn (pie chart) thống kê tỷ lệ hoàn thành todos theo user 1–5, lưu thành PNG</span>
+        <span class="hint-chip" onclick="fillInput(this)">Viết Python sinh dữ liệu giả 200 học sinh (tên, điểm toán, lý, hóa), xuất CSV và vẽ histogram phân phối điểm trung bình bằng seaborn</span>
+        <span class="hint-chip" onclick="fillInput(this)">Cài pandas và đọc file JSON từ https://jsonplaceholder.typicode.com/posts, tính thống kê số từ trong title theo userId, xuất kết quả ra CSV</span>
+        <span class="hint-chip" onclick="fillInput(this)">Tỷ giá USD/VND và EUR/VND hiện tại là bao nhiêu?</span>
+        <span class="hint-chip" onclick="fillInput(this)">Viết Python dùng requests tải 10 posts từ JSONPlaceholder, phân tích tần suất từ trong body bằng collections.Counter, xuất top-20 ra file JSON</span>
+        <span class="hint-chip" onclick="fillInput(this)">Vẽ đồ thị 3D surface của hàm z = sin(x)*cos(y) với x,y từ -π đến π bằng matplotlib, lưu PNG</span>
+        <span class="hint-chip" onclick="fillInput(this)">Lấy danh sách tất cả albums của user 1 từ JSONPlaceholder, tạo báo cáo HTML đẹp với bảng</span>
+        <span class="hint-chip" onclick="fillInput(this)">Viết Python tạo mê cung ngẫu nhiên 20x20 bằng thuật toán DFS, vẽ bằng matplotlib và lưu PNG</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="ctx-panel" id="ctx-panel">
+    <div class="ctx-header" id="ctx-toggle-btn">
+      <span class="ctx-title">Context Window</span>
+      <span class="ctx-toggle" id="ctx-chevron">▾</span>
+    </div>
+    <div id="ctx-body"></div>
+  </div>
+
+  <div class="attachment-bar" id="attachment-bar">
+    <!-- Image attachment (existing) -->
+    <div class="attachment-preview" id="att-img-area">
+      <img id="attachment-thumb" src="" alt="preview"/>
+      <button id="attachment-remove" type="button" title="Xóa ảnh">✕</button>
+    </div>
+    <!-- Non-image file attachment (new) -->
+    <div class="att-file-card" id="att-file-area" style="display:none">
+      <span id="att-file-icon">📄</span>
+      <span class="att-file-name" id="att-file-name"></span>
+      <span class="attachment-hint" id="att-file-size"></span>
+      <button class="att-remove" id="att-file-remove" type="button" title="Xóa file">✕</button>
+    </div>
+    <span class="attachment-hint" id="att-hint">📸 Ảnh đính kèm · agent sẽ dùng <code>read_image</code></span>
+  </div>
+
+  <form class="input-area" id="form" autocomplete="off">
+    <label class="attach-btn" for="file-input" title="Đính kèm file (CSV, Excel, JSON, ảnh…)">📎</label>
+    <input type="file" id="file-input" style="display:none" />
+    <input id="input" placeholder="Hỏi gì đó… hoặc Ctrl+V / kéo file vào đây" />
+    <button type="submit" id="send-btn">Gửi</button>
+    <button type="button" id="stop-btn">⬛ Dừng</button>
+    <button type="button" id="compact-btn" class="compact-btn" disabled title="Nén lịch sử hội thoại bằng LLM">🗜️ Compact</button>
+  </form>
+</div>
+
+<div class="drag-overlay" id="drag-overlay">
+  <div class="drag-overlay-inner">📎 Thả file vào đây</div>
+</div>
+
+<script>
+// Strip img tags from LLM markdown — artifacts display images directly
+const _mdRenderer = new marked.Renderer();
+_mdRenderer.image = (_href, _title, text) => `<em>[image: ${text || _href || ''}]</em>`;
+marked.setOptions({ breaks: true, gfm: true, renderer: _mdRenderer });
+
+let sessionId = crypto.randomUUID(); // fresh ID every page load → distinct Langfuse session per conversation
+
+let history = [];
+let config  = { root_agent: "?", search: "?", code_exec: "?", skills: [] };
+
+// Per-agent config — model strings updated after /config fetch
+let AGENT_CFG = {
+  root_agent: { label: '🤖 root agent', color: '#a78bfa', model: 'gemini · 1M', limit: 1024*1024, sys: 160 },
+};
+
+fetch("/config").then(r => r.json()).then(c => {
+  config = c;
+  AGENT_CFG.root_agent.model = `${c.root_agent} · 1M`;
+  const skillList = (c.skills || []).join(', ') || 'none';
+  document.getElementById("config-bar").innerHTML =
+    `Agent <span>${c.root_agent}</span>`
+    + ` · web_search <span>${c.search}</span>`
+    + (c.code_exec ? ` · code_exec <span>${c.code_exec}</span>` : "")
+    + ` · skills <span>${skillList}</span>`;
+  ctxBar.init();
+});
+
+const $msgs  = document.getElementById("messages");
+const $input = document.getElementById("input");
+const $btn   = document.getElementById("send-btn");
+const $empty = document.getElementById("empty-state");
+
+// ── Inline flow indicator ────────────────────────────────────────────────────
+let $flow = null;
+function showFlow(text) {
+  if (!$flow) { $flow = document.createElement("div"); $flow.className = "flow-indicator"; $msgs.appendChild($flow); }
+  $flow.innerHTML = `<div class="thinking-dots"><span></span><span></span><span></span></div><span>${escHtml(text)}</span>`;
+  scrollBottom();
+}
+function hideFlow() { if ($flow) { $flow.remove(); $flow = null; } }
+
+// ── AI logo singleton ────────────────────────────────────────────────────────
+const $aiLogo = (() => {
+  const el = document.createElement("div");
+  el.className = "ai-logo";
+  el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="currentColor"><path d="m19.6 66.5 19.7-11 .3-1-.3-.5h-1l-3.3-.2-11.2-.3L14 53l-9.5-.5-2.4-.5L0 49l.2-1.5 2-1.3 2.9.2 6.3.5 9.5.6 6.9.4L38 49.1h1.6l.2-.7-.5-.4-.4-.4L29 41l-10.6-7-5.6-4.1-3-2-1.5-2-.6-4.2 2.7-3 3.7.3.9.2 3.7 2.9 8 6.1L37 36l1.5 1.2.6-.4.1-.3-.7-1.1L33 25l-6-10.4-2.7-4.3-.7-2.6c-.3-1-.4-2-.4-3l3-4.2L28 0l4.2.6L33.8 2l2.6 6 4.1 9.3L47 29.9l2 3.8 1 3.4.3 1h.7v-.5l.5-7.2 1-8.7 1-11.2.3-3.2 1.6-3.8 3-2L61 2.6l2 2.9-.3 1.8-1.1 7.7L59 27.1l-1.5 8.2h.9l1-1.1 4.1-5.4 6.9-8.6 3-3.5L77 13l2.3-1.8h4.3l3.1 4.7-1.4 4.9-4.4 5.6-3.7 4.7-5.3 7.1-3.2 5.7.3.4h.7l12-2.6 6.4-1.1 7.6-1.3 3.5 1.6.4 1.6-1.4 3.4-8.2 2-9.6 2-14.3 3.3-.2.1.2.3 6.4.6 2.8.2h6.8l12.6 1 3.3 2 1.9 2.7-.3 2-5.1 2.6-6.8-1.6-16-3.8-5.4-1.3h-.8v.4l4.6 4.5 8.3 7.5L89 80.1l.5 2.4-1.3 2-1.4-.2-9.2-7-3.6-3-8-6.8h-.5v.7l1.8 2.7 9.8 14.7.5 4.5-.7 1.4-2.6 1-2.7-.6-5.8-8-6-9-4.7-8.2-.5.4-2.9 30.2-1.3 1.5-3 1.2-2.5-2-1.4-3 1.4-6.2 1.6-8 1.3-6.4 1.2-7.9.7-2.6v-.2H49L43 72l-9 12.3-7.2 7.6-1.7.7-3-1.5.3-2.8L24 86l10-12.8 6-7.9 4-4.6-.1-.5h-.3L17.2 77.4l-4.7.6-2-2 .2-3 1-1 8-5.5Z"/></svg>`;
+  return el;
+})();
+
+// ── Bubble factory ───────────────────────────────────────────────────────────
+function createAiBubble(infoLabel) {
+  hideFlow();
+  $aiLogo.remove();
+  const el = document.createElement("div");
+  el.className = "msg ai";
+  el.innerHTML = `
+    <div class="bubble">
+      <div class="bubble-infobar">
+        <div class="spinner"></div>
+        <span class="infobar-label">${escHtml(infoLabel)}</span>
+      </div>
+      <div class="bubble-content"></div>
+      <div class="bubble-meta"></div>
+    </div>`;
+  $msgs.appendChild(el);
+  $aiLogo.className = "ai-logo generating";
+  $msgs.appendChild($aiLogo);
+  scrollBottom();
+  return el;
+}
+
+function setInfobar(bubble, text) {
+  const lb = bubble.querySelector(".infobar-label");
+  if (lb) lb.textContent = text;
+}
+
+function hideInfobar(bubble) {
+  bubble.querySelector(".bubble-infobar")?.classList.add("hidden");
+}
+
+// ── Content block helpers ────────────────────────────────────────────────────
+function getTextBlock(bubble) {
+  const content = bubble.querySelector(".bubble-content");
+  const last = content.lastElementChild;
+  if (!last || last.classList.contains("content-tools") || last.classList.contains("artifact-card")) {
+    const block = document.createElement("div");
+    block.className = "content-text cursor";
+    content.appendChild(block);
+    return block;
+  }
+  return last;
+}
+
+function addToolChip(bubble, name, query, task) {
+  if (!bubble) return;
+  hideInfobar(bubble);
+  const content = bubble.querySelector(".bubble-content");
+  const last = content.lastElementChild;
+
+  if (last && last.classList.contains("content-text")) {
+    last.classList.remove("cursor");
+  }
+
+  let toolsRow;
+  if (last && last.classList.contains("content-tools")) {
+    toolsRow = last;
+  } else {
+    toolsRow = document.createElement("div");
+    toolsRow.className = "content-tools";
+    content.appendChild(toolsRow);
+  }
+
+  const item = document.createElement("div");
+  item.className = "tool-item loading";
+  item.dataset.toolName = name;
+
+  const header = document.createElement("div");
+  header.className = "tool-header";
+
+  const label = document.createElement("span");
+  label.className = "tool-label";
+  if (task) {
+    label.innerHTML = lbl(task);
+  } else {
+    label.innerHTML = toolLabel(name, query);
+  }
+
+  const chevron = document.createElement("span");
+  chevron.className = "tool-chevron";
+  chevron.textContent = "▾";
+
+  const tok = document.createElement("span");
+  tok.className = "tool-tok";
+
+  header.appendChild(label);
+  header.appendChild(tok);
+  header.appendChild(chevron);
+
+  const body = document.createElement("div");
+  body.className = "tool-body";
+
+  const resultDiv = document.createElement("div");
+  resultDiv.className = "tool-result";
+  body.appendChild(resultDiv);
+
+  header.addEventListener("click", () => {
+    item.classList.toggle("expanded");
+  });
+
+  item.appendChild(header);
+  item.appendChild(body);
+  toolsRow.appendChild(item);
+  scrollBottom();
+  return item;
+}
+
+function h(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function lbl(action, rest) {
+  return rest ? `<b>${h(action)}</b> ${h(rest)}` : `<b>${h(action)}</b>`;
+}
+function base(path) {
+  return String(path).replace(/^.*[\/\\]/, '').slice(0, 44);
+}
+
+function toolLabel(name, extra) {
+  const b = extra ? base(extra) : null;
+  if (name === "web_search")         return extra ? lbl('search', `"${extra.slice(0,44)}"`) : lbl('search');
+  if (name === "execute_python")     return extra ? lbl('exec', extra.split('\n').find(l=>l.trim())?.slice(0,40)) : lbl('exec');
+  if (name === "execute_file")       return lbl('run', b);
+  if (name === "write_code" ||
+      name === "write_file")         return lbl('write', b);
+  if (name === "write_binary_file")  return lbl('blob', b);
+  if (name === "read_code")          return lbl('read', b);
+  if (name === "patch_code")         return lbl('patch', b);
+  if (name === "grep_code")          return lbl('grep', b);
+  if (name === "read_excel")         return lbl('xlsx', b);
+  if (name === "edit_xlsx")          return lbl('edit', b);
+  if (name === "zip_files")          return lbl('zip', b);
+  if (name === "list_workspace")     return lbl('ls');
+  if (name === "present_artifact" ||
+      name === "present_file")       return lbl('show', b);
+  if (name === "read_image")         return lbl('vision');
+  if (name === "load_skill")          return lbl('load skill');
+  return lbl(name);
+}
+
+function findToolItem(bubble, name, index, extraSelector) {
+  if (!bubble) return null;
+  const sel = name
+    ? `.tool-item[data-tool-name="${name}"]${extraSelector || ""}`
+    : `.tool-item${extraSelector || ""}`;
+  const all = [...bubble.querySelectorAll(sel)];
+  if (index != null) {
+    const byIdx = all.find(el => el.dataset.tcIndex === String(index));
+    if (byIdx) return byIdx;
+  }
+  return all[0] || null;
+}
+
+// ── Artifact file card helpers ────────────────────────────────────────────────
+const MIME_ICON = {
+  "text/x-python": "🐍", "application/x-python": "🐍",
+  "text/javascript": "⚡", "application/json": "📋",
+  "text/csv": "📊", "text/html": "🌐",
+  "text/markdown": "📝", "text/plain": "📄",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "📊",
+  "application/vnd.ms-excel": "📊",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "📝",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "📊",
+  "application/zip": "🗜️",
+  "application/pdf": "📕",
+};
+function mimeIcon(mime, filename) {
+  if (MIME_ICON[mime]) return MIME_ICON[mime];
+  const ext = (filename.split(".").pop() || "").toLowerCase();
+  return { py:"🐍", js:"⚡", ts:"⚡", json:"📋", csv:"📊", html:"🌐", md:"📝",
+           txt:"📄", sh:"💻", xlsx:"📊", xls:"📊", docx:"📝", pptx:"📊",
+           pdf:"📕", zip:"🗜️" }[ext] || "📄";
+}
+function mimeToHlLang(mime, filename) {
+  const ext = (filename.split(".").pop() || "").toLowerCase();
+  return { py:"python", js:"javascript", ts:"typescript", json:"json", csv:"plaintext",
+           html:"html", md:"markdown", txt:"plaintext", sh:"bash" }[ext] || "plaintext";
+}
+function isBinaryMime(mime) {
+  if (!mime) return false;
+  if (mime.startsWith('image/')) return true;
+  return [
+    'application/pdf',
+    'application/zip',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  ].includes(mime);
+}
+function fmtBytes(bytes) {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
+}
+
+// ── File attachment helpers ───────────────────────────────────────────────────
+const BLOCKED_EXTS = new Set([
+  'exe', 'bat', 'cmd', 'com', 'msi', 'dll', 'scr', 'ps1', 'vbs', 'vbe',
+  'ws', 'wsf', 'pif', 'jar', 'app', 'deb', 'rpm', 'dmg', 'pkg',
+]);
+const MAX_FILE_BYTES = 25 * 1024 * 1024;
+
+function getExt(name) {
+  const i = name.lastIndexOf('.');
+  return i >= 0 ? name.slice(i + 1).toLowerCase() : '';
+}
+
+function fileTypeIcon(ext) {
+  const m = {
+    csv: '📊', xlsx: '📊', xls: '📊',
+    pdf: '📕', txt: '📄', md: '📝',
+    json: '📋', xml: '📋', yaml: '📋', yml: '📋',
+    py: '🐍', js: '⚡', ts: '⚡', html: '🌐',
+    zip: '🗜️', tar: '🗜️', gz: '🗜️',
+    png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', webp: '🖼️',
+  };
+  return m[ext] || '📄';
+}
+
+function createArtifactCard(bubble, data) {
+  const { id, filename, mime, size, line_count } = data;
+  const card = document.createElement("div");
+  card.className = "artifact-card";
+  card.dataset.artId = id;
+  const icon = mimeIcon(mime || "", filename || "file");
+  const lang = mimeToHlLang(mime || "", filename || "file");
+  const isBin = isBinaryMime(mime || "");
+  const metaInfo = isBin ? fmtBytes(size || 0) : `${line_count || 0} lines · ${fmtBytes(size || 0)}`;
+  const previewHtml = isBin && !mime?.startsWith('image/')
+    ? `<div style="padding:12px 14px;font-size:12px;color:var(--muted);font-family:var(--font)">📥 Binary file — nhấn ↓ Tải để tải về</div>`
+    : `<pre><code class="language-${lang}" data-content-pending="1"></code></pre>`;
+  card.innerHTML = `
+    <div class="artifact-card-header">
+      <span class="artifact-icon">${icon}</span>
+      <span class="artifact-name">${escHtml(filename || "file")}</span>
+      <span class="artifact-meta-info">${metaInfo}</span>
+      <a class="artifact-download" href="/artifact/${id}?download=true" download="${escHtml(filename || "file")}" onclick="event.stopPropagation()">↓ Tải</a>
+      <span class="artifact-toggle">▾</span>
+    </div>
+    <div class="artifact-preview">
+      ${previewHtml}
+    </div>`;
+  card.querySelector(".artifact-card-header").addEventListener("click", () => {
+    card.classList.toggle("open");
+  });
+  const content = bubble.querySelector(".bubble-content");
+  const last = content.lastElementChild;
+  if (last && last.classList.contains("content-text")) last.classList.remove("cursor");
+  content.appendChild(card);
+  scrollBottom();
+  return card;
+}
+
+function populateArtifactCard(bubble, data) {
+  const { id, content } = data;
+  const card = bubble?.querySelector(`.artifact-card[data-art-id="${id}"]`);
+  if (!card) return;
+  const code = card.querySelector("code");
+  if (!code || !code.dataset.contentPending) return;
+  delete code.dataset.contentPending;
+  code.textContent = content;
+  if (window.hljs) hljs.highlightElement(code);
+}
+
+// ── Text rendering ────────────────────────────────────────────────────────────
+function renderMd(block, markdown) {
+  block._raw = markdown;
+  block.innerHTML = DOMPurify.sanitize(marked.parse(markdown));
+}
+
+// RAF state — caps markdown re-renders to 60fps regardless of token rate
+let _rafPending = false;
+let _rafBlock = null;
+
+function appendToken(bubble, token) {
+  hideInfobar(bubble);
+  const block = getTextBlock(bubble);
+  block._raw = (block._raw || "") + token;
+  _rafBlock = block;
+  if (!_rafPending) {
+    _rafPending = true;
+    requestAnimationFrame(() => {
+      _rafPending = false;
+      if (_rafBlock) {
+        _rafBlock.innerHTML = DOMPurify.sanitize(marked.parse(_rafBlock._raw || ""));
+        scrollBottom();
+      }
+    });
+  }
+}
+
+function setBatchText(bubble, text) {
+  hideInfobar(bubble);
+  const block = getTextBlock(bubble);
+  renderMd(block, text);
+  scrollBottom();
+}
+
+function finishBubble(bubble, agent, citations, ttft, reasoning) {
+  bubble.querySelectorAll(".content-text.cursor").forEach(b => b.classList.remove("cursor"));
+  hideInfobar(bubble);
+  $aiLogo.classList.remove("generating", "streaming");
+  const meta = bubble.querySelector(".bubble-meta");
+
+  // Only show TTFT when meaningful — round 2+ bubbles measure ~0ms (past TTFT already)
+  if (ttft != null && parseFloat(ttft) >= 0.1) {
+    const t = document.createElement("span");
+    t.className = "badge ttft";
+    t.textContent = `TTFT ${ttft}s`;
+    meta.appendChild(t);
+  }
+  if (agent) {
+    const labels = {
+      root_agent: `🤖 root agent — ${config.root_agent}`,
+    };
+    const b = document.createElement("span");
+    b.className = `badge agent-${agent}`;
+    b.textContent = labels[agent] || agent;
+    meta.appendChild(b);
+  }
+  if (reasoning) {
+    const r = document.createElement("span");
+    r.className = "badge reasoning";
+    r.title = reasoning;
+    r.textContent = `💬 ${reasoning}`;
+    meta.appendChild(r);
+  }
+  if (citations > 0) {
+    const c = document.createElement("span");
+    c.className = "badge";
+    c.textContent = `📎 ${citations} citations`;
+    meta.appendChild(c);
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function scrollBottom() { requestAnimationFrame(() => { $msgs.scrollTop = $msgs.scrollHeight; }); }
+function escHtml(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+// ── Image attach (Ctrl+V paste + drag-and-drop) ──────────────────────────────
+async function compressImage(file, maxDim = 768) {
+  return new Promise(resolve => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width: w, height: h } = img;
+      if (w > maxDim || h > maxDim) {
+        if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
+        else        { w = Math.round(w * maxDim / h); h = maxDim; }
+      }
+      const cvs = document.createElement('canvas');
+      cvs.width = w; cvs.height = h;
+      cvs.getContext('2d').drawImage(img, 0, 0, w, h);
+      resolve(cvs.toDataURL('image/jpeg', 0.78));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+}
+
+// Uploads compressed data URI to server, returns Promise<image_id | null>
+async function uploadImageToServer(dataUri) {
+  try {
+    const r = await fetch('/upload-image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data_uri: dataUri }),
+    });
+    const j = await r.json();
+    return j.image_id || null;
+  } catch { return null; }
+}
+
+// attachedImageUri — data URI used for the local thumbnail preview only
+// attachedImageUpload — Promise<image_id|null>, resolved by server after upload
+let attachedImageUri    = null;
+let attachedImageUpload = null;
+
+// Non-image file attachment state
+let attachedFile = null;  // { name, ext, size, uploadPromise: Promise<{ok,filename,size}|null> }
+
+const $attachBar   = document.getElementById('attachment-bar');
+const $attachThumb = document.getElementById('attachment-thumb');
+const $dragOverlay = document.getElementById('drag-overlay');
+const $attImgArea  = document.getElementById('att-img-area');
+const $attFileArea = document.getElementById('att-file-area');
+const $attHint     = document.getElementById('att-hint');
+
+function clearAttachedImage() {
+  attachedImageUri    = null;
+  attachedImageUpload = null;
+  $attachThumb.src = '';
+  if (!attachedFile) $attachBar.classList.remove('visible');
+}
+
+function clearAttachedFile() {
+  attachedFile = null;
+  $attFileArea.style.display = 'none';
+  $attImgArea.style.display  = '';
+  $attHint.innerHTML = '📸 Ảnh đính kèm · agent sẽ dùng <code>read_image</code>';
+  if (!attachedImageUri) $attachBar.classList.remove('visible');
+}
+
+document.getElementById('att-file-remove').addEventListener('click', () => clearAttachedFile());
+
+async function uploadFileToServer(file) {
+  return new Promise(resolve => {
+    const fr = new FileReader();
+    fr.onload = async () => {
+      try {
+        const b64 = fr.result.split(',')[1];
+        const r = await fetch('/upload-file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: file.name,
+            data_b64: b64,
+            mime_type: file.type || 'application/octet-stream',
+            session_id: sessionId,
+          }),
+        });
+        resolve(await r.json());
+      } catch (e) { resolve(null); }
+    };
+    fr.onerror = () => resolve(null);
+    fr.readAsDataURL(file);
+  });
+}
+
+async function handleFileAttach(file) {
+  const ext = getExt(file.name);
+  if (BLOCKED_EXTS.has(ext)) {
+    alert(`Loại file .${ext} không được phép tải lên.`);
+    return;
+  }
+  if (file.size > MAX_FILE_BYTES) {
+    alert(`File quá lớn (tối đa 25 MB). File này: ${fmtBytes(file.size)}.`);
+    return;
+  }
+  // Images → existing image flow
+  if (file.type.startsWith('image/')) {
+    clearAttachedFile();
+    attachImageFile(file);
+    return;
+  }
+  // Non-image file
+  clearAttachedImage();
+  clearAttachedFile();
+  attachedFile = { name: file.name, ext, size: file.size, uploadPromise: uploadFileToServer(file) };
+  const $icon = document.getElementById('att-file-icon');
+  const $name = document.getElementById('att-file-name');
+  const $size = document.getElementById('att-file-size');
+  $icon.textContent = fileTypeIcon(ext);
+  $name.textContent = file.name;
+  $size.textContent = fmtBytes(file.size);
+  $attImgArea.style.display  = 'none';
+  $attFileArea.style.display = '';
+  $attHint.textContent = '📎 File đính kèm · sẽ có ở /uploaded/ trong execute_python';
+  $attachBar.classList.add('visible');
+}
+
+document.getElementById('file-input').addEventListener('change', e => {
+  const file = e.target.files?.[0];
+  if (file) handleFileAttach(file);
+  e.target.value = '';  // allow re-selecting same file
+});
+
+// Compress, show thumbnail, and kick off server upload in the background.
+async function attachImageFile(file) {
+  const uri = await compressImage(file);
+  if (!uri) return;
+  attachedImageUri    = uri;
+  attachedImageUpload = uploadImageToServer(uri);  // non-blocking
+  $attachThumb.src = uri;
+  $attachBar.classList.add('visible');
+}
+
+document.getElementById('attachment-remove').addEventListener('click', () => clearAttachedImage());
+
+// Ctrl+V paste — accept any file (image or non-image)
+document.addEventListener('paste', async e => {
+  const items = [...(e.clipboardData?.items || [])];
+  const fileItem = items.find(it => it.kind === 'file');
+  if (!fileItem) return;
+  e.preventDefault();
+  const file = fileItem.getAsFile();
+  if (file) handleFileAttach(file);
+});
+
+// Drag and drop — accept any file
+let _dragCount = 0;
+document.addEventListener('dragenter', e => {
+  if ([...(e.dataTransfer?.items || [])].some(it => it.kind === 'file')) {
+    _dragCount++;
+    $dragOverlay.classList.add('active');
+  }
+});
+document.addEventListener('dragleave', () => {
+  _dragCount = Math.max(0, _dragCount - 1);
+  if (!_dragCount) $dragOverlay.classList.remove('active');
+});
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', async e => {
+  e.preventDefault();
+  _dragCount = 0;
+  $dragOverlay.classList.remove('active');
+  const file = e.dataTransfer?.files?.[0];
+  if (file) handleFileAttach(file);
+});
+
+let abortController = null;
+const $stopBtn = document.getElementById('stop-btn');
+$stopBtn.addEventListener('click', () => {
+  if (abortController) {
+    abortController.abort();
+    // Fire-and-forget stop signal to server
+    fetch(`/stop?session_id=${encodeURIComponent(sessionId)}`, { method: 'POST' }).catch(() => {});
+  }
+});
+
+function setInputDisabled(v) {
+  $input.disabled = v;
+  $btn.disabled = v;
+  $btn.style.display     = v ? 'none'        : '';
+  $stopBtn.style.display = v ? 'inline-flex' : 'none';
+}
+
+// ── Compact ────────────────────────────────────────────────────────────────────
+const $compactBtn = document.getElementById('compact-btn');
+
+function updateCompactButtonState() {
+  $compactBtn.disabled = (history.length === 0);
+}
+
+function appendSystemMessage(text) {
+  const el = document.createElement('div');
+  el.className = 'sys-msg';
+  el.innerHTML = `<span class="sys-msg-inner">${escHtml(text)}</span>`;
+  $msgs.appendChild(el);
+  scrollBottom();
+}
+
+$compactBtn.addEventListener('click', async () => {
+  if (history.length === 0) return;
+  $compactBtn.disabled = true;
+  $compactBtn.textContent = '🗜️ Đang compact...';
+
+  // Show progress bubble in chat
+  const $progress = document.createElement('div');
+  $progress.className = 'compact-progress';
+  $progress.innerHTML =
+    `<div class="compact-progress-msg">⏳ Đang tóm tắt đoạn hội thoại để chúng ta tiếp tục trao đổi hiệu quả, vui lòng chờ giây lát...</div>` +
+    `<div class="compact-progress-track"><div class="compact-progress-fill indeterminate"></div></div>`;
+  $msgs.appendChild($progress);
+  scrollBottom();
+  const $fill = $progress.querySelector('.compact-progress-fill');
+
+  // ~1200 chars ≈ 300 tokens for a 200-word summary
+  const ESTIMATED_CHARS = 1200;
+
+  try {
+    const resp = await fetch('/compact', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, history }),
+    });
+
+    if (!resp.ok || !resp.body) {
+      const errText = await resp.text();
+      $progress.remove();
+      appendSystemMessage(`⚠️ Compact thất bại: ${errText}`);
+      return;
+    }
+
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let sseBuf = '';
+    let result = null;
+
+    loop:
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseBuf += decoder.decode(value, { stream: true });
+      const delim = sseBuf.lastIndexOf('\n\n');
+      if (delim === -1) continue;
+      const chunk = sseBuf.slice(0, delim + 2);
+      sseBuf = sseBuf.slice(delim + 2);
+
+      for (const { type, data } of parseSse(chunk)) {
+        if (type === 'progress') {
+          if (data.phase === 'summarizing') {
+            // Switch from shimmer to real fill
+            $fill.classList.remove('indeterminate');
+            const pct = Math.min(95, (data.generated / ESTIMATED_CHARS) * 100);
+            $fill.style.width = pct + '%';
+          }
+        } else if (type === 'done') {
+          $fill.classList.remove('indeterminate');
+          $fill.style.width = '100%';
+          result = data;
+        } else if (type === 'error') {
+          $progress.remove();
+          appendSystemMessage(`⚠️ Compact thất bại: ${data.message}`);
+          break loop;
+        }
+      }
+    }
+
+    if (result) {
+      history = result.history;
+      $progress.remove();
+      appendSystemMessage(
+        `✅ Đã compact: ${result.tokens_before.toLocaleString()} → ` +
+        `${result.tokens_after.toLocaleString()} tokens ` +
+        `(-${result.reduction_pct.toFixed(0)}%, ${result.compact_ms.toFixed(0)}ms)`
+      );
+    }
+
+  } catch (e) {
+    $progress.remove();
+    appendSystemMessage(`⚠️ Compact lỗi: ${e.message}`);
+  } finally {
+    $compactBtn.textContent = '🗜️ Compact';
+    updateCompactButtonState();
+  }
+});
+
+function fillInput(el) { $input.value = el.textContent; $input.focus(); }
+
+function addUserBubble(text, thumbUri) {
+  const el = document.createElement("div");
+  el.className = "msg user";
+  const imgHintRe  = /\[Ảnh đính kèm — gọi read_image\("([^"]+)"\)[^\]]*\]/;
+  const fileHintRe = /\[File '([^']+)' \(([^)]+)\) đã upload[^\]]*\]/;
+  const imgMatch  = text.match(imgHintRe);
+  const fileMatch = text.match(fileHintRe);
+  let bodyHtml;
+  if (imgMatch || thumbUri) {
+    const userText = imgMatch ? text.replace(imgHintRe, '').trim() : text.trim();
+    const imgSrc = thumbUri || `/image/${imgMatch?.[1]}`;
+    bodyHtml = (userText ? `${escHtml(userText)}<br>` : '') +
+      `<img src="${imgSrc}" style="max-width:180px;max-height:180px;border-radius:6px;margin-top:6px;display:block;border:1px solid var(--border)">`;
+  } else if (fileMatch) {
+    const fname    = fileMatch[1];
+    const fsize    = fileMatch[2];
+    const userText = text.replace(fileHintRe, '').trim();
+    const fext     = getExt(fname);
+    const ficon    = fileTypeIcon(fext);
+    bodyHtml = (userText ? `${escHtml(userText)}<br>` : '') +
+      `<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;` +
+      `font-family:var(--mono);background:var(--surface2);border:1px solid var(--border);` +
+      `border-radius:6px;padding:4px 10px;margin-top:6px;">` +
+      `${ficon} <strong>${escHtml(fname)}</strong> <span style="color:var(--muted)">${escHtml(fsize)}</span></span>`;
+  } else {
+    bodyHtml = escHtml(text);
+  }
+  el.innerHTML = `<div class="bubble"><div class="bubble-body">${bodyHtml}</div></div>`;
+  $msgs.appendChild(el);
+  scrollBottom();
+}
+
+// ── SSE parser ────────────────────────────────────────────────────────────────
+function parseSse(buf) {
+  const events = [];
+  for (const block of buf.split(/\n\n+/)) {
+    if (!block.trim()) continue;
+    let type = "message", dataStr = "";
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event: ")) type = line.slice(7).trim();
+      if (line.startsWith("data: "))  dataStr = line.slice(6).trim();
+    }
+    if (!dataStr) continue;
+    try { events.push({ type, data: JSON.parse(dataStr) }); }
+    catch { events.push({ type, data: { text: dataStr } }); }
+  }
+  return events;
+}
+
+// ── Context window inspector ─────────────────────────────────────────────────
+const CTX_COLOR = {
+  sys:     '#6366f1',
+  history: '#f59e0b',
+  tools:   '#10b981',
+  output:  '#ec4899',
+};
+
+const ctxBar = (() => {
+  const $body    = document.getElementById('ctx-body');
+  const $chevron = document.getElementById('ctx-chevron');
+
+  document.getElementById('ctx-toggle-btn').addEventListener('click', () => {
+    const hidden = $body.style.display === 'none';
+    $body.style.display = hidden ? '' : 'none';
+    $chevron.textContent = hidden ? '▾' : '▸';
+  });
+
+  function c2t(ch) { return Math.max(0, Math.round(ch / 3)); }
+  function fmtT(t)  { return t >= 1000 ? (t / 1024).toFixed(1) + 'K' : String(t); }
+
+  const turnState  = {};
+  const realUsage  = {};
+  let currentAgent = null;
+
+  function histTok() {
+    return c2t(history.reduce((s, m) => s + (m.content || '').length, 0));
+  }
+
+  function renderRow(key, hTok) {
+    const cfg = AGENT_CFG[key] || { label: key, color: '#888', model: key, limit: 64*1024, sys: 120 };
+    const real = realUsage[key];
+    let segs, total;
+    if (real) {
+      total = real.promptTok + real.completionTok;
+      segs = [
+        { tok: real.promptTok,     color: CTX_COLOR.history, name: 'Input'  },
+        { tok: real.completionTok, color: CTX_COLOR.output,  name: 'Output' },
+      ];
+    } else {
+      const st      = turnState[key] || { toolChars: 0, outputChars: 0 };
+      const sysTok  = cfg.sys;
+      const toolTok = c2t(st.toolChars);
+      const outTok  = c2t(st.outputChars);
+      total = sysTok + hTok + toolTok + outTok;
+      segs = [
+        { tok: sysTok,  color: CTX_COLOR.sys,    name: 'System Prompt' },
+        { tok: hTok,    color: CTX_COLOR.history, name: 'History' },
+        { tok: toolTok, color: CTX_COLOR.tools,   name: 'Tools' },
+        { tok: outTok,  color: CTX_COLOR.output,  name: 'Output' },
+      ];
+    }
+    const pct = (total / cfg.limit * 100).toFixed(2);
+    const displayLimit = Math.max(cfg.limit, total * 10);
+    const bar = segs.map(s => {
+      const w = (s.tok / displayLimit * 100).toFixed(3);
+      return `<div class="ctx-seg" style="width:${w}%;background:${s.color}"></div>`;
+    }).join('');
+    const legend = segs.filter(s => s.tok > 0).map(s =>
+      `<span class="ctx-legend-item"><span class="ctx-dot" style="background:${s.color}"></span>${s.name}&nbsp;<span class="ctx-val">${fmtT(s.tok)}</span></span>`
+    ).join('');
+    return `<div class="ctx-agent-row">
+      <div class="ctx-agent-label">
+        <span><span style="color:${cfg.color};font-weight:500">${cfg.label}</span>&ensp;<span style="color:var(--muted)">${cfg.model}</span></span>
+        <span style="color:#c4b5fd">${fmtT(total)}&thinsp;/&thinsp;${fmtT(cfg.limit)}&thinsp;tok&thinsp;·&thinsp;${pct}%</span>
+      </div>
+      <div class="ctx-bar-track">${bar}</div>
+      <div class="ctx-legend">${legend}</div>
+    </div>`;
+  }
+
+  function render() {
+    const hTok = histTok();
+    $body.innerHTML = Object.keys(AGENT_CFG).map(k => renderRow(k, hTok)).join('');
+  }
+
+  return {
+    newTurn() {
+      Object.keys(turnState).forEach(k => delete turnState[k]);
+      Object.keys(realUsage).forEach(k => delete realUsage[k]);
+      currentAgent = null;
+      render();
+    },
+    setRealUsage(agent, promptTok, completionTok) {
+      realUsage[agent] = { promptTok, completionTok };
+      render();
+    },
+    reset(agent) {
+      currentAgent = agent;
+      if (agent && !turnState[agent]) {
+        turnState[agent] = { toolChars: 0, outputChars: 0 };
+      }
+      render();
+    },
+    addToolChars(chars) {
+      if (!currentAgent || !turnState[currentAgent]) return;
+      turnState[currentAgent].toolChars += (chars || 0);
+      render();
+    },
+    addOutput(text) {
+      if (!currentAgent || !turnState[currentAgent]) return;
+      turnState[currentAgent].outputChars += (text || '').length;
+      render();
+    },
+    init() { render(); },
+  };
+})();
+
+ctxBar.init();
+
+// ── Chat ──────────────────────────────────────────────────────────────────────
+document.getElementById("form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const msg = $input.value.trim();
+  if (!msg) return;
+  $input.value = "";
+  await sendMessage(msg);
+});
+
+async function sendMessage(message) {
+  // Resolve image attachment: await server upload (usually already done), build hint
+  let finalMessage = message;
+  let thumbUri = null;
+  if (attachedImageUri) {
+    thumbUri = attachedImageUri;
+    const imageId = await attachedImageUpload;  // await in case network was slow
+    clearAttachedImage();
+    if (imageId) {
+      const hint = `[Ảnh đính kèm — gọi read_image("${imageId}") để phân tích ảnh này]`;
+      finalMessage = message ? `${message}\n\n${hint}` : `Hãy phân tích ảnh này\n\n${hint}`;
+    }
+    // imageId=null means upload failed — send without image hint rather than embedding 10k b64
+  }
+
+  // Resolve non-image file attachment
+  if (attachedFile) {
+    const fileRef = attachedFile;
+    clearAttachedFile();
+    const result = await fileRef.uploadPromise;
+    if (result?.ok) {
+      const sizeStr = fmtBytes(fileRef.size);
+      const hint = `[File '${result.filename}' (${sizeStr}) đã upload — có thể dùng tại /uploaded/${result.filename} trong execute_python]`;
+      finalMessage = finalMessage ? `${finalMessage}\n\n${hint}` : hint;
+    }
+  }
+
+  abortController = new AbortController();
+  setInputDisabled(true);
+  $empty && $empty.remove();
+  $aiLogo.remove();
+  ctxBar.newTurn();
+  ctxBar.reset("root_agent");
+  addUserBubble(finalMessage, thumbUri);
+  showFlow("Đang suy nghĩ...");
+
+  const turns           = [];
+  let curBubble         = null;
+  let curAgent          = "root_agent";
+  let curCitations      = 0;
+  let supervisorStartTime  = Date.now();
+  let turnFirstOutputMs    = null;
+  let curTtft              = null;
+  let curReasoning      = '';
+  let toolsCollapsed = false;
+
+  function commitCurrent() {
+    if (!curBubble) return;
+    finishBubble(curBubble, curAgent, curCitations, curTtft, curReasoning);
+    const texts = [...curBubble.querySelectorAll(".content-text")]
+      .map(b => b._raw || b.textContent).filter(Boolean).join("\n\n");
+    turns.push({ agent: curAgent, content: texts });
+    curBubble = null; curCitations = 0; curReasoning = ''; toolsCollapsed = false;
+  }
+
+  function markFirstOutput() {
+    if (turnFirstOutputMs == null) {
+      turnFirstOutputMs = Date.now();
+      curTtft = ((turnFirstOutputMs - supervisorStartTime) / 1000).toFixed(1);
+      $aiLogo.classList.remove('generating');
+      $aiLogo.classList.add('streaming');
+    }
+  }
+
+  function ensureBubble() {
+    if (!curBubble) curBubble = createAiBubble("🤖 Agent đang trả lời...");
+  }
+
+  try {
+    const resp = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: finalMessage, session_id: sessionId, history }),
+      signal: abortController.signal,
+    });
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let sseBuf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseBuf += decoder.decode(value, { stream: true });
+      const delim = sseBuf.lastIndexOf("\n\n");
+      if (delim === -1) continue;
+      const chunk = sseBuf.slice(0, delim + 2);
+      sseBuf = sseBuf.slice(delim + 2);
+
+      for (const { type, data } of parseSse(chunk)) {
+        switch (type) {
+
+          case "tool_call_start": {
+            ensureBubble();
+            markFirstOutput();
+            hideInfobar(curBubble);
+            const earlyChip = addToolChip(curBubble, data.name, null, null);
+            if (earlyChip && data.index != null)
+              earlyChip.dataset.tcIndex = String(data.index);
+            break;
+          }
+
+          case "tool_arg_chunk": {
+            if (!curBubble || data.index == null) break;
+            const earlyItem = [...(curBubble.querySelectorAll('.tool-item.loading') || [])]
+              .find(el => el.dataset.tcIndex === String(data.index));
+            if (!earlyItem) break;
+            const toolName = earlyItem.dataset.toolName;
+            earlyItem.dataset.partialArgs = (earlyItem.dataset.partialArgs || '') + (data.chunk || '');
+            const partial = earlyItem.dataset.partialArgs;
+            const m = partial.match(/"(?:query|task|code|filename|reason)"\s*:\s*"((?:[^"\\]|\\.)*)/);
+            // write_code/write_file use 'content' (not 'code') — extract separately so the
+            // code preview shows the actual code being generated, not just the filename.
+            const mContent = (toolName === 'write_code' || toolName === 'write_file')
+              ? partial.match(/"content"\s*:\s*"((?:[^"\\]|\\.)*)/s)
+              : null;
+            if (m && m[1]) {
+              const unescaped = m[1].replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\\\/g, '\\').replace(/\\"/g, '"');
+              const firstLine = (unescaped.split('\n').find(l => l.trim()) || unescaped).trim();
+              const preview = firstLine.slice(0, 44) + (firstLine.length > 44 ? '…' : '');
+              // basename: strip /uploaded/, /tmp/, path separators — show only filename
+              const basename = preview.replace(/^.*[\/\\]/, '');
+              const liveLabel = earlyItem.querySelector('.tool-label');
+              if (liveLabel) {
+                if (toolName === 'web_search') {
+                  liveLabel.innerHTML = lbl('search', `"${preview}"`);
+                } else if (toolName === 'execute_python') {
+                  liveLabel.innerHTML = lbl('exec', preview);
+                } else if (toolName === 'execute_file') {
+                  liveLabel.innerHTML = lbl('run', basename);
+                } else if (toolName === 'write_code' || toolName === 'write_file') {
+                  liveLabel.innerHTML = lbl('write', basename);
+                } else if (toolName === 'write_binary_file') {
+                  liveLabel.innerHTML = lbl('blob', basename);
+                } else if (toolName === 'patch_code') {
+                  liveLabel.innerHTML = lbl('patch', basename);
+                } else if (toolName === 'read_code') {
+                  const startM = partial.match(/"start_line"\s*:\s*(\d+)/);
+                  const endM   = partial.match(/"end_line"\s*:\s*(\d+)/);
+                  if (startM || endM) {
+                    const s = startM ? startM[1] : '1';
+                    const e = endM   ? endM[1]   : '…';
+                    liveLabel.innerHTML = lbl('read', `${basename}:${s}–${e}`);
+                  } else {
+                    liveLabel.innerHTML = lbl('read', basename);
+                  }
+                } else if (toolName === 'grep_code') {
+                  const pm = partial.match(/"pattern"\s*:\s*"((?:[^"\\]|\\.)*?)(?:"|$)/);
+                  if (pm && pm[1]) {
+                    const pat = pm[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\').slice(0, 32);
+                    liveLabel.innerHTML = lbl('grep', `"${pat}" (${basename})`);
+                  } else {
+                    liveLabel.innerHTML = lbl('grep', basename);
+                  }
+                } else if (toolName === 'read_excel') {
+                  const sheetM = partial.match(/"sheet_name"\s*:\s*"((?:[^"\\]|\\.)*?)(?:"|$)/);
+                  liveLabel.innerHTML = sheetM && sheetM[1]
+                    ? lbl('xlsx', `${basename} [${sheetM[1]}]`)
+                    : lbl('xlsx', basename);
+                } else if (toolName === 'edit_xlsx') {
+                  liveLabel.innerHTML = lbl('edit', basename);
+                } else if (toolName === 'zip_files') {
+                  liveLabel.innerHTML = lbl('zip', basename);
+                } else if (toolName === 'present_artifact' || toolName === 'present_file') {
+                  liveLabel.innerHTML = lbl('show', basename);
+                } else {
+                  liveLabel.innerHTML = lbl(toolName, preview || null);
+                }
+              }
+              const isWriteTool = toolName === 'write_code' || toolName === 'write_file';
+              if (toolName === 'execute_python' || toolName === 'execute_file' || isWriteTool) {
+                // write tools: stream code from 'content' field; exec tools: use 'code'/'query' field
+                const previewSrc = isWriteTool ? mContent : m;
+                if (previewSrc && previewSrc[1]) {
+                  const codeText = previewSrc[1].replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\\\/g, '\\').replace(/\\"/g, '"');
+                  const resDiv = earlyItem.querySelector('.tool-result');
+                  if (resDiv) {
+                    resDiv.textContent = codeText;
+                    if (!earlyItem.dataset.codePreview) {
+                      const labelEl = earlyItem.querySelector('.tool-label');
+                      const genLabel = isWriteTool ? lbl('write', '…') : lbl('exec', '…');
+                      if (labelEl) { earlyItem.dataset.savedLabel = labelEl.innerHTML; labelEl.innerHTML = genLabel; }
+                    }
+                    earlyItem.dataset.codePreview = '1';
+                    earlyItem.classList.add('expanded');
+                    requestAnimationFrame(() => { resDiv.scrollTop = 999999; });
+                  }
+                }
+              }
+            }
+            // present_file streams its "content" arg separately (comes after "filename")
+            if (toolName === 'present_file') {
+              const cm = partial.match(/"content"\s*:\s*"((?:[^"\\]|\\.)*)/);
+              if (cm && cm[1]) {
+                const body = cm[1]
+                  .replace(/\\n/g, '\n').replace(/\\t/g, '\t')
+                  .replace(/\\\\/g, '\\').replace(/\\"/g, '"');
+                const resDiv = earlyItem.querySelector('.tool-result');
+                if (resDiv) {
+                  resDiv.textContent = body;
+                  resDiv.scrollTop = resDiv.scrollHeight;
+                  earlyItem.dataset.codePreview = '1';
+                  earlyItem.classList.add('expanded');
+                }
+              }
+            }
+            break;
+          }
+
+          case "tool_call": {
+            ensureBubble();
+            // Find pre-created chip by index, or by name (for json_agent path without streaming)
+            let item = null;
+            if (data.index != null) {
+              item = [...(curBubble.querySelectorAll('.tool-item.loading') || [])]
+                .find(el => el.dataset.tcIndex === String(data.index)) || null;
+            }
+            if (!item) item = findToolItem(curBubble, data.name, null, '.loading');
+            if (!item) addToolChip(curBubble, data.name, data.query, data.task);
+            setInfobar(curBubble, `🔧 ${data.name}()...`);
+            break;
+          }
+
+          case "tool_retry":
+            if (curBubble) setInfobar(curBubble, `🔄 ${data.info}`);
+            break;
+
+          case "tools_done":
+            if (curBubble) setInfobar(curBubble, "📦 Đang tổng hợp...");
+            break;
+
+          case "citations": {
+            curCitations = data.count || 0;
+            if (curBubble) {
+              const item = findToolItem(curBubble, "web_search", data.index, ".loading");
+              if (item) {
+                const q = item.dataset.query;
+                item.querySelector(".tool-label").innerHTML = q
+                  ? lbl('search', `"${h(q)}" · ${curCitations} nguồn`)
+                  : lbl('search', `${curCitations} nguồn`);
+                setInfobar(curBubble, `✅ Tìm thấy ${curCitations} nguồn, đang tổng hợp...`);
+              }
+            }
+            break;
+          }
+
+          case "tool_stream": {
+            if (curBubble) {
+              // Python tool_stream has no name/index — find the last loading or streaming item
+              const items = [...curBubble.querySelectorAll('.tool-item.loading, .tool-item.streaming')];
+              const item = data.name
+                ? findToolItem(curBubble, data.name, data.index, ".loading")
+                : items[items.length - 1];
+              if (item) {
+                // Transition from gen phase → exec phase on first Docker output
+                if (item.dataset.codePreview) {
+                  delete item.dataset.codePreview;
+                  const r = item.querySelector('.tool-result');
+                  if (r) r.textContent += '\n─── Output ───\n';
+                  const labelEl = item.querySelector('.tool-label');
+                  if (labelEl) { item.dataset.savedLabel = labelEl.innerHTML; labelEl.innerHTML = lbl('run', '…'); }
+                }
+                item.dataset.hadOutput = '1';
+                item.classList.add("streaming", "expanded");
+                const result = item.querySelector(".tool-result");
+                if (result) {
+                  result.textContent += data.text || "";
+                  requestAnimationFrame(() => { result.scrollTop = 999999; });
+                  scrollBottom();
+                }
+                const chars = (data.text || "").length;
+                if (chars > 0) {
+                  item.dataset.tokChars = (+(item.dataset.tokChars || 0) + chars).toString();
+                  const approx = Math.round(+item.dataset.tokChars / 4);
+                  const tokEl = item.querySelector(".tool-tok");
+                  if (tokEl && !item.dataset.tokExact) tokEl.textContent = `~${approx} tok`;
+                }
+              }
+            }
+            break;
+          }
+
+          case "tool_result": {
+            if (curBubble) {
+              let item = null;
+              if (data.index != null) item = findToolItem(curBubble, data.name, data.index, ".loading");
+              if (!item) item = findToolItem(curBubble, data.name, null, ".loading");
+              if (!item) item = findToolItem(curBubble, null, null, ".loading");
+              if (item) {
+                const resultText = data.result || "";
+                // Detect Python runtime errors: traceback, named exceptions, tool-level errors
+                const isError = /^(Error|Traceback|SyntaxError|ModuleNotFoundError|ImportError|TypeError|ValueError|RuntimeError|AttributeError|NameError|KeyError|IndexError|ContainerError|Execution error|Docker unavailable|\[TOOL ERROR\])/.test(resultText)
+                  || resultText.includes("Traceback (most recent call last)");
+                const hadDockerOutput = !!item.dataset.hadOutput;
+                const hadCodePreview  = !!item.dataset.codePreview;
+                delete item.dataset.hadOutput;
+                delete item.dataset.codePreview;
+                // Restore label that was changed to "▶ Running..."
+                if (item.dataset.savedLabel) {
+                  const labelEl = item.querySelector('.tool-label');
+                  if (labelEl) labelEl.innerHTML = item.dataset.savedLabel;
+                  delete item.dataset.savedLabel;
+                }
+                item.classList.remove("loading", "streaming");
+                item.classList.add(isError ? "error" : "has-result");
+                const result = item.querySelector(".tool-result");
+                if (isError) {
+                  // Errors always replace (show full traceback even if code was previewed)
+                  if (result) result.textContent = resultText;
+                } else if (!hadDockerOutput && !hadCodePreview) {
+                  // Nothing shown yet — fill with result
+                  if (result) result.textContent = resultText;
+                }
+                // else: body already has code preview + "─── Output ───" + streamed lines; keep it
+                if (isError) {
+                  item.classList.add("expanded");
+                } else {
+                  item.classList.remove("expanded");
+                }
+              }
+            }
+            ctxBar.addToolChars((data.result || '').length);
+            break;
+          }
+
+          case "file_present":
+            ensureBubble();
+            hideInfobar(curBubble);
+            createArtifactCard(curBubble, data);
+            break;
+
+          case "artifact_content":
+            if (curBubble) populateArtifactCard(curBubble, data);
+            break;
+
+          case "artifact_binary": {
+            // Binary file (PNG/JPEG/PDF) — embed as <img> inside the artifact card
+            if (!curBubble) break;
+            const binCard = curBubble.querySelector(`.artifact-card[data-art-id="${data.id}"]`);
+            if (!binCard) break;
+            if (data.mime && data.mime.startsWith('image/')) {
+              const binPreview = binCard.querySelector('.artifact-preview');
+              if (binPreview) {
+                binPreview.innerHTML = `<img src="data:${data.mime};base64,${data.data}" style="max-width:100%;display:block;border-radius:0 0 8px 8px;">`;
+                binCard.classList.add('open');  // auto-expand to show image
+              }
+            }
+            scrollBottom();
+            break;
+          }
+
+          case "token":
+            ensureBubble();
+            markFirstOutput();
+            ctxBar.addOutput(data.text);
+            if (!toolsCollapsed && curBubble) {
+              toolsCollapsed = true;
+              // Only collapse still-streaming items; keep explicitly expanded ones (output + errors) visible
+              curBubble.querySelectorAll(".tool-item.streaming").forEach(item => {
+                item.classList.remove("streaming");
+              });
+            }
+            appendToken(curBubble, data.text);
+            break;
+
+          case "token_batch":
+            ensureBubble();
+            markFirstOutput();
+            ctxBar.addOutput(data.text);
+            setBatchText(curBubble, data.text);
+            break;
+
+          case "usage":
+            if (data.agent && data.prompt_tok != null) {
+              ctxBar.setRealUsage(data.agent, data.prompt_tok, data.completion_tok || 0);
+            }
+            break;
+
+          case "done":
+            commitCurrent();
+            hideFlow();
+            break;
+
+          case "error": {
+            commitCurrent(); hideFlow();
+            const eb = createAiBubble("⚠️ Lỗi");
+            setBatchText(eb, `**Lỗi:** ${escHtml(data.message || "Unknown error")}`);
+            finishBubble(eb, null, 0, null);
+            break;
+          }
+        }
+      }
+    }
+
+    // Store finalMessage in history — image hint is just a short text line, not base64
+    history.push({ role: "user", content: finalMessage });
+    for (const t of turns) history.push({ role: "model", content: t.content, name: t.agent });
+    updateCompactButtonState();
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      // User clicked Stop — finalize whatever was in progress
+      commitCurrent();
+      hideFlow();
+    } else {
+      hideFlow();
+      const eb = createAiBubble("⚠️ Kết nối lỗi");
+      setBatchText(eb, `**Kết nối lỗi:** ${err.message}`);
+      finishBubble(eb, null, 0, null);
+    }
+  } finally {
+    abortController = null;
+    setInputDisabled(false);
+    $input.focus();
+  }
+}
+</script>
+</body>
+</html>

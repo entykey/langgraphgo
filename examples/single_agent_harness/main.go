@@ -1,0 +1,523 @@
+// single_agent_harness — single-agent ReAct loop (DeepSeek) + Gemini VLM/Search
+//
+// Run:
+//
+//	cd examples && go run ./single_agent_harness/
+//
+// Frontend: served from static/index.html (copied from Python lab).
+package main
+
+import (
+	"bufio"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+const listenAddr = ":8080"
+
+var (
+	geminiClient *GeminiClient
+	dsClient     *DSClient
+	_agentModel  string
+	_searchModel string
+)
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+func main() {
+	loadDotEnv()
+	initSkillsDir()
+
+	_agentModel = getEnv("AGENT_MODEL", "deepseek-v4-flash")
+	_searchModel = getEnv("SEARCH_MODEL", "gemini-3.1-flash-lite")
+
+	initLangfuse()
+	initMinio()
+
+	geminiClient = NewGeminiClient(mustEnv("GOOGLE_API_KEY"), _searchModel)
+	dsClient = NewDSClient(mustEnv("DEEPSEEK_API_KEY"), _agentModel)
+
+	fmt.Printf("[single_agent_harness] listening on http://localhost%s\n", listenAddr)
+	fmt.Printf("  agent  = deepseek/%s\n", _agentModel)
+	fmt.Printf("  search = gemini/%s\n", _searchModel)
+	fmt.Printf("  skills = %s\n", skillsDir)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/chat", corsMiddleware(chatHandler))
+	mux.HandleFunc("/compact", corsMiddleware(compactHandler))
+	mux.HandleFunc("/stop", corsMiddleware(stopHandler))
+	mux.HandleFunc("/upload-image", corsMiddleware(uploadImageJSONHandler))
+	mux.HandleFunc("/upload", corsMiddleware(uploadHandler)) // multipart (from image_cache.go)
+	mux.HandleFunc("/image/", corsMiddleware(imageHandler))
+	mux.HandleFunc("/artifact/", corsMiddleware(artifactHandler))
+	mux.HandleFunc("/config", corsMiddleware(configHandler))
+	mux.Handle("/", staticHandler())
+
+	if err := http.ListenAndServe(listenAddr, mux); err != nil {
+		fmt.Fprintln(os.Stderr, "server:", err)
+		globalLF.Shutdown()
+		os.Exit(1)
+	}
+}
+
+// ── Chat endpoint ──────────────────────────────────────────────────────────────
+
+type chatRequest struct {
+	Message   string        `json:"message"`
+	SessionID string        `json:"session_id"`
+	History   []messageJSON `json:"history"`
+}
+
+func chatHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 20<<20)
+
+	var req chatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.SessionID == "" {
+		req.SessionID = lfUUID()
+	}
+
+	// Build full history including the new user message.
+	history := append(req.History, messageJSON{Role: "user", Content: req.Message})
+
+	// SSE headers.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher, canFlush := w.(http.Flusher)
+
+	eventCh := make(chan SSEEvent, 512)
+	ctx, cancel := context.WithCancel(r.Context())
+	registerCancel(req.SessionID, cancel)
+
+	traceID := lfUUID()
+	globalLF.TraceCreate(traceID, req.SessionID, req.Message, []string{"single-agent-harness", "go", _agentModel})
+
+	go func() {
+		defer close(eventCh)
+		answer := runAgentTurn(ctx, req.SessionID, traceID, history, eventCh)
+		globalLF.TraceUpdate(traceID, answer)
+		deregisterCancel(req.SessionID)
+	}()
+
+	// Drain SSE events and forward to client.
+	// Batch consecutive token events to reduce network round-trips.
+	const idleTimeout = 150 * time.Second
+	var overflow *SSEEvent
+
+	for {
+		var ev SSEEvent
+		if overflow != nil {
+			ev = *overflow
+			overflow = nil
+		} else {
+			var ok bool
+			if ev, ok = recvTimeout(eventCh, idleTimeout); !ok {
+				// Channel closed.
+				break
+			}
+			if ev.Type == "" {
+				// Timeout sentinel.
+				fmt.Fprint(w, SSEEvent{Type: "error", Data: map[string]string{"message": "idle timeout"}}.Encode())
+				if canFlush {
+					flusher.Flush()
+				}
+				break
+			}
+		}
+
+		// Drain consecutive token events.
+		if ev.Type == "token" {
+			text, _ := ev.Data.(map[string]string)["text"]
+			for {
+				next, ok := tryRecv(eventCh)
+				if !ok {
+					break
+				}
+				if next.Type == "token" {
+					text += next.Data.(map[string]string)["text"]
+				} else {
+					overflow = &next
+					break
+				}
+			}
+			fmt.Fprint(w, SSEEvent{Type: "token", Data: map[string]string{"text": text}}.Encode())
+			if canFlush {
+				flusher.Flush()
+			}
+			continue
+		}
+
+		fmt.Fprint(w, ev.Encode())
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	fmt.Fprint(w, SSEEvent{Type: "done", Data: map[string]any{}}.Encode())
+	if canFlush {
+		flusher.Flush()
+	}
+}
+
+// recvTimeout reads one event from ch with a timeout.
+// Returns (ev, true) on success, (zero, false) if ch is closed,
+// or ({Type: ""}, true) on timeout.
+func recvTimeout(ch <-chan SSEEvent, timeout time.Duration) (SSEEvent, bool) {
+	select {
+	case ev, ok := <-ch:
+		if !ok {
+			return SSEEvent{}, false
+		}
+		return ev, true
+	case <-time.After(timeout):
+		return SSEEvent{}, true // timeout sentinel: Type == ""
+	}
+}
+
+func tryRecv(ch <-chan SSEEvent) (SSEEvent, bool) {
+	select {
+	case ev := <-ch:
+		return ev, true
+	default:
+		return SSEEvent{}, false
+	}
+}
+
+// ── Compact endpoint ──────────────────────────────────────────────────────────
+
+type compactRequest struct {
+	SessionID string        `json:"session_id"`
+	History   []messageJSON `json:"history"`
+}
+
+func compactHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req compactRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if len(req.History) == 0 {
+		writeSSE(w, "error", map[string]string{"message": "history is empty"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	flusher, canFlush := w.(http.Flusher)
+
+	sseFlush := func(evType string, data any) {
+		fmt.Fprint(w, SSEEvent{Type: evType, Data: data}.Encode())
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	tokensBefore := estimateTokens(req.History)
+	sseFlush("progress", map[string]any{"phase": "start", "tokens_before": tokensBefore, "generated": 0})
+
+	t0 := time.Now()
+	sessionID := req.SessionID
+	if sessionID == "" {
+		sessionID = "unknown"
+	}
+
+	newHistory, tokensBefore, tokensAfter, err := summarizeHistory(
+		r.Context(),
+		req.History,
+		sessionID,
+		func(generated int) {
+			sseFlush("progress", map[string]any{"phase": "summarizing", "generated": generated})
+		},
+	)
+	if err != nil {
+		sseFlush("error", map[string]string{"message": err.Error()})
+		return
+	}
+
+	compactMS := float64(time.Since(t0).Milliseconds())
+	reductionPct := 0.0
+	if tokensBefore > 0 {
+		reductionPct = (1 - float64(tokensAfter)/float64(tokensBefore)) * 100
+	}
+
+	fmt.Printf("[compact] session=%s before=%d after=%d saved=%d (%.0f%%) in %.0fms\n",
+		sessionID[:8], tokensBefore, tokensAfter, tokensBefore-tokensAfter, reductionPct, compactMS)
+
+	sseFlush("done", map[string]any{
+		"history":       newHistory,
+		"tokens_before": tokensBefore,
+		"tokens_after":  tokensAfter,
+		"saved_tokens":  tokensBefore - tokensAfter,
+		"reduction_pct": reductionPct,
+		"compact_ms":    compactMS,
+	})
+}
+
+// ── Stop endpoint ─────────────────────────────────────────────────────────────
+
+func stopHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sessionID := r.URL.Query().Get("session_id")
+	found := cancelSession(sessionID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "found": found}) //nolint:errcheck
+}
+
+// ── Upload-image (JSON data_uri) ──────────────────────────────────────────────
+
+type uploadImageJSONReq struct {
+	DataURI string `json:"data_uri"`
+}
+
+func uploadImageJSONHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 20<<20)
+
+	var req uploadImageJSONReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if !strings.HasPrefix(req.DataURI, "data:") {
+		http.Error(w, "data_uri must start with 'data:'", http.StatusBadRequest)
+		return
+	}
+
+	parts := strings.SplitN(req.DataURI, ",", 2)
+	if len(parts) != 2 {
+		http.Error(w, "malformed data_uri", http.StatusBadRequest)
+		return
+	}
+	header := strings.Split(parts[0], ";")[0]
+	mime := strings.TrimPrefix(header, "data:")
+	b64data := parts[1]
+
+	data, err := base64.StdEncoding.DecodeString(b64data)
+	if err != nil {
+		http.Error(w, "invalid base64", http.StatusBadRequest)
+		return
+	}
+
+	// Compress + dedup (reuse logic from image_cache.go).
+	finalData, finalMime, _ := compressForStorage(data, mime)
+	hash := sha256Hex(finalData)
+
+	if existingID, hit := hashIndex.Load(hash); hit {
+		id := existingID.(string)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"image_id": id, "mime": finalMime}) //nolint:errcheck
+		return
+	}
+
+	id := lfUUID()
+	if minioEnabled() {
+		if err := minioPut(id, finalMime, finalData); err != nil {
+			http.Error(w, "storage error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		imageCache.Store(id, imageEntry{Mime: finalMime})
+	} else {
+		imageCache.Store(id, imageEntry{
+			Mime: finalMime,
+			B64:  base64.StdEncoding.EncodeToString(finalData),
+		})
+	}
+	hashIndex.Store(hash, id)
+
+	fmt.Printf("[upload-image] stored %s (%s, %s)\n", id, finalMime, fmtSize(len(finalData)))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"image_id": id, "mime": finalMime}) //nolint:errcheck
+}
+
+// ── Artifact endpoint ─────────────────────────────────────────────────────────
+
+func artifactHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/artifact/")
+	if id == "" {
+		http.Error(w, "missing id", http.StatusBadRequest)
+		return
+	}
+	art := getArtifactByID(id)
+	if art == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	download := r.URL.Query().Get("download") == "1"
+	if download {
+		ascii := strings.Map(func(r rune) rune {
+			if r >= 0x20 && r <= 0x7e {
+				return r
+			}
+			return '_'
+		}, art.Filename)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, ascii))
+	}
+	w.Header().Set("Content-Type", art.MimeType)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(art.Content)))
+	w.Write(art.Content) //nolint:errcheck
+}
+
+// ── Config endpoint ───────────────────────────────────────────────────────────
+
+func configHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"root_agent": "deepseek/" + _agentModel,
+		"search":     "gemini/" + _searchModel,
+		"code_exec":  "disabled",
+		"skills":     listSkills(),
+	})
+}
+
+// ── Static files ──────────────────────────────────────────────────────────────
+
+func staticHandler() http.Handler {
+	candidates := []string{
+		"static",
+		"examples/single_agent_harness/static",
+		"single_agent_harness/static",
+	}
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && info.IsDir() {
+			fmt.Printf("[single_agent_harness] serving static from %s\n", p)
+			fs := http.FileServer(http.Dir(p))
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+					w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+					w.Header().Set("Pragma", "no-cache")
+				}
+				fs.ServeHTTP(w, r)
+			})
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "Single Agent Harness API running.")
+		fmt.Fprintln(w, "Place index.html in static/ directory.")
+	})
+}
+
+// ── Middleware ────────────────────────────────────────────────────────────────
+
+func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// ── .env loading ──────────────────────────────────────────────────────────────
+
+func loadDotEnvFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		kv := strings.SplitN(line, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		k := strings.TrimSpace(kv[0])
+		raw := kv[1]
+		if i := strings.Index(raw, " #"); i >= 0 {
+			raw = raw[:i]
+		}
+		v := strings.Trim(strings.TrimSpace(raw), `"'`)
+		if os.Getenv(k) == "" {
+			os.Setenv(k, v) //nolint:errcheck
+		}
+	}
+	return true
+}
+
+func loadDotEnv() {
+	if cwd, err := os.Getwd(); err == nil {
+		if loadDotEnvFile(filepath.Join(cwd, ".env")) {
+			return
+		}
+	}
+	if exe, err := os.Executable(); err == nil {
+		if loadDotEnvFile(filepath.Join(filepath.Dir(exe), ".env")) {
+			return
+		}
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		dir := cwd
+		for i := 0; i < 4; i++ {
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+			if loadDotEnvFile(filepath.Join(dir, ".env")) {
+				return
+			}
+		}
+	}
+}
+
+func mustEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		fmt.Fprintf(os.Stderr, "❌  %s not set. Create a .env file or export the variable.\n", key)
+		os.Exit(1)
+	}
+	return v
+}
+
+func getEnv(key, defaultVal string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return defaultVal
+}
+
+// ── SSE helper ────────────────────────────────────────────────────────────────
+
+func writeSSE(w http.ResponseWriter, evType string, data any) {
+	fmt.Fprint(w, SSEEvent{Type: evType, Data: data}.Encode())
+}
