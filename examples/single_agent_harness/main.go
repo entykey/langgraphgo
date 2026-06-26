@@ -55,6 +55,7 @@ func main() {
 	mux.HandleFunc("/compact", corsMiddleware(compactHandler))
 	mux.HandleFunc("/stop", corsMiddleware(stopHandler))
 	mux.HandleFunc("/upload-image", corsMiddleware(uploadImageJSONHandler))
+	mux.HandleFunc("/upload-file", corsMiddleware(uploadFileHandler))
 	mux.HandleFunc("/upload", corsMiddleware(uploadHandler)) // multipart (from image_cache.go)
 	mux.HandleFunc("/image/", corsMiddleware(imageHandler))
 	mux.HandleFunc("/artifact/", corsMiddleware(artifactHandler))
@@ -387,6 +388,88 @@ func artifactHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", art.MimeType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(art.Content)))
 	w.Write(art.Content) //nolint:errcheck
+}
+
+// ── Upload-file (non-image files: xlsx, csv, json, …) ────────────────────────
+
+var blockedUploadExts = map[string]bool{
+	"exe": true, "bat": true, "cmd": true, "com": true, "msi": true,
+	"dll": true, "scr": true, "ps1": true, "vbs": true, "vbe": true,
+	"ws": true, "wsf": true, "pif": true, "jar": true, "app": true,
+	"deb": true, "rpm": true, "dmg": true, "pkg": true,
+}
+
+const maxUploadBytes = 25 << 20 // 25 MiB — matches Python lab
+
+type uploadFileReq struct {
+	Filename  string `json:"filename"`
+	DataB64   string `json:"data_b64"`
+	MimeType  string `json:"mime_type"`
+	SessionID string `json:"session_id"`
+}
+
+func uploadFileHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes+1024) // slight headroom for JSON envelope
+
+	var req uploadFileReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Filename == "" || req.SessionID == "" || req.DataB64 == "" {
+		http.Error(w, "filename, session_id and data_b64 required", http.StatusBadRequest)
+		return
+	}
+
+	// Sanitize filename: strip path separators
+	safe := filepath.Base(req.Filename)
+	if safe == "." || safe == "/" {
+		http.Error(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
+
+	// Block dangerous extensions (server-side — mirrors frontend + Python lab)
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(safe), "."))
+	if blockedUploadExts[ext] {
+		http.Error(w, fmt.Sprintf("file type .%s is not allowed", ext), http.StatusBadRequest)
+		return
+	}
+
+	data, err := base64.StdEncoding.DecodeString(req.DataB64)
+	if err != nil {
+		http.Error(w, "invalid base64", http.StatusBadRequest)
+		return
+	}
+	if len(data) > maxUploadBytes {
+		http.Error(w, "file too large (max 25 MB)", http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	dir := sessionUploadDir(req.SessionID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+
+	dest := filepath.Join(dir, safe)
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		http.Error(w, "write error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Printf("[upload-file] session=%s file=%s size=%s\n", req.SessionID[:8], safe, fmtSize(len(data)))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"ok":       true,
+		"filename": safe,
+		"size":     len(data),
+		"path":     "/uploaded/" + safe,
+	})
 }
 
 // ── Config endpoint ───────────────────────────────────────────────────────────

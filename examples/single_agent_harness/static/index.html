@@ -365,6 +365,20 @@
     flex-shrink: 0; line-height: 1; padding: 0;
   }
   .att-file-card .att-remove:hover { background: #b91c1c; }
+  /* Upload progress bar inside file card */
+  .att-upload-progress {
+    flex: 1; height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; min-width: 60px;
+  }
+  .att-upload-fill {
+    height: 100%; background: var(--accent); border-radius: 2px; transition: width .08s linear; width: 0%;
+  }
+  /* ✓ / ✕ badge */
+  .att-upload-badge {
+    width: 16px; height: 16px; border-radius: 50%; font-size: 9px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .att-upload-badge.ok  { background: #16a34a; color: #fff; }
+  .att-upload-badge.err { background: #dc2626; color: #fff; }
 
   /* Attach-file button (📎) */
   .attach-btn {
@@ -547,6 +561,8 @@
       <span id="att-file-icon">📄</span>
       <span class="att-file-name" id="att-file-name"></span>
       <span class="attachment-hint" id="att-file-size"></span>
+      <div class="att-upload-progress"><div class="att-upload-fill" id="att-upload-fill"></div></div>
+      <div class="att-upload-badge" id="att-upload-badge" style="display:none"></div>
       <button class="att-remove" id="att-file-remove" type="button" title="Xóa file">✕</button>
     </div>
     <span class="attachment-hint" id="att-hint">📸 Ảnh đính kèm · agent sẽ dùng <code>read_image</code></span>
@@ -1027,24 +1043,31 @@ function clearAttachedFile() {
 
 document.getElementById('att-file-remove').addEventListener('click', () => clearAttachedFile());
 
-async function uploadFileToServer(file) {
+// XHR-based upload so we can show progress. Reads file as base64 then POSTs JSON.
+function uploadFileToServer(file, onProgress) {
   return new Promise(resolve => {
     const fr = new FileReader();
-    fr.onload = async () => {
-      try {
-        const b64 = fr.result.split(',')[1];
-        const r = await fetch('/upload-file', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            filename: file.name,
-            data_b64: b64,
-            mime_type: file.type || 'application/octet-stream',
-            session_id: sessionId,
-          }),
-        });
-        resolve(await r.json());
-      } catch (e) { resolve(null); }
+    fr.onload = () => {
+      const b64 = fr.result.split(',')[1];
+      const body = JSON.stringify({
+        filename: file.name,
+        data_b64: b64,
+        mime_type: file.type || 'application/octet-stream',
+        session_id: sessionId,
+      });
+      const xhr = new XMLHttpRequest();
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); } catch { resolve(null); }
+        } else { resolve(null); }
+      };
+      xhr.onerror = () => resolve(null);
+      xhr.open('POST', '/upload-file');
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.send(body);
     };
     fr.onerror = () => resolve(null);
     fr.readAsDataURL(file);
@@ -1067,20 +1090,42 @@ async function handleFileAttach(file) {
     attachImageFile(file);
     return;
   }
-  // Non-image file
+  // Non-image file — show card with progress bar, then ✓/✕
   clearAttachedImage();
   clearAttachedFile();
-  attachedFile = { name: file.name, ext, size: file.size, uploadPromise: uploadFileToServer(file) };
+
   const $icon = document.getElementById('att-file-icon');
   const $name = document.getElementById('att-file-name');
   const $size = document.getElementById('att-file-size');
-  $icon.textContent = fileTypeIcon(ext);
-  $name.textContent = file.name;
-  $size.textContent = fmtBytes(file.size);
+  const $fill = document.getElementById('att-upload-fill');
+  const $badge = document.getElementById('att-upload-badge');
+
+  $icon.textContent  = fileTypeIcon(ext);
+  $name.textContent  = file.name;
+  $size.textContent  = fmtBytes(file.size);
+  if ($fill)  { $fill.style.width = '0%'; }
+  if ($badge) { $badge.className = 'att-upload-badge'; $badge.textContent = ''; $badge.style.display = 'none'; }
   $attImgArea.style.display  = 'none';
   $attFileArea.style.display = '';
-  $attHint.textContent = '📎 File đính kèm · sẽ có ở /uploaded/ trong execute_python';
+  $attHint.textContent = '📎 File đính kèm · sẽ có ở /uploaded/ trong run_code';
   $attachBar.classList.add('visible');
+
+  const uploadPromise = uploadFileToServer(file, pct => {
+    if ($fill) $fill.style.width = `${Math.round(pct * 100)}%`;
+  }).then(result => {
+    if ($fill) $fill.style.width = '100%';
+    if ($badge) {
+      $badge.style.display = 'flex';
+      if (result?.ok) {
+        $badge.className = 'att-upload-badge ok'; $badge.textContent = '✓';
+      } else {
+        $badge.className = 'att-upload-badge err'; $badge.textContent = '✕';
+      }
+    }
+    return result;
+  });
+
+  attachedFile = { name: file.name, ext, size: file.size, uploadPromise };
 }
 
 document.getElementById('file-input').addEventListener('change', e => {
@@ -1442,7 +1487,7 @@ async function sendMessage(message) {
     const result = await fileRef.uploadPromise;
     if (result?.ok) {
       const sizeStr = fmtBytes(fileRef.size);
-      const hint = `[File '${result.filename}' (${sizeStr}) đã upload — có thể dùng tại /uploaded/${result.filename} trong execute_python]`;
+      const hint = `[File '${result.filename}' (${sizeStr}) đã upload — có thể dùng tại /uploaded/${result.filename} trong run_code]`;
       finalMessage = finalMessage ? `${finalMessage}\n\n${hint}` : hint;
     }
   }

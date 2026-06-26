@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -56,10 +57,8 @@ var skillToolsMap = map[string][]ToolDef{
 
 // ── Core tool factory ─────────────────────────────────────────────────────────
 
-// makeCoreTools returns the tools that are always available (load_skill, web_search,
-// read_image, write_file, list_workspace).
-// activeSkills is a live reference to the session's skill set — mutations by load_skill persist.
-// toolMapRef allows load_skill to inject new domain tools for the current turn.
+// makeCoreTools returns the tools always available to the agent.
+// Ported faithfully from Python lab's _make_core_tools().
 func makeCoreTools(
 	ctx context.Context,
 	sessionID string,
@@ -67,12 +66,14 @@ func makeCoreTools(
 	toolMapRef *map[string]ToolDef,
 	eventCh chan<- SSEEvent,
 ) []ToolDef {
+
+	// ── load_skill ────────────────────────────────────────────────────────────
 	loadSkill := ToolDef{
 		Name:        "load_skill",
 		Description: "Read detailed domain documentation before handling a domain-specific request. After loading, the domain's tools become available in subsequent rounds.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"skill_name":{"type":"string","description":"Name of the skill to load"}},"required":["skill_name"]}`),
 		Fn: func(args map[string]any) string {
-			name, _ := args["skill_name"].(string)
+			name := strArg(args, "skill_name")
 			if name == "" {
 				return "Error: skill_name is required."
 			}
@@ -86,7 +87,6 @@ func makeCoreTools(
 				return fmt.Sprintf("Skill '%s' không tồn tại. Có sẵn: %s", name, strings.Join(available, ", "))
 			}
 			activeSkills[name] = true
-			// Inject domain tools into the live toolMap so they're available next round.
 			if tm := *toolMapRef; tm != nil {
 				for _, t := range skillToolsMap[name] {
 					tm[t.Name] = t
@@ -97,12 +97,13 @@ func makeCoreTools(
 		},
 	}
 
+	// ── web_search ────────────────────────────────────────────────────────────
 	webSearch := ToolDef{
 		Name:        "web_search",
 		Description: "Search the web for current information, news, prices, or real-world facts.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"Search query in Vietnamese or English"}},"required":["query"]}`),
 		Fn: func(args map[string]any) string {
-			query, _ := args["query"].(string)
+			query := strArg(args, "query")
 			if query == "" {
 				return "Error: missing query"
 			}
@@ -130,12 +131,13 @@ func makeCoreTools(
 		},
 	}
 
+	// ── read_image ────────────────────────────────────────────────────────────
 	readImage := ToolDef{
 		Name:        "read_image",
 		Description: "Analyze an image using vision AI. Accepts a URL, base64 data URI, or a server-side image_id (UUID).",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"url_or_data":{"type":"string","description":"Image URL, data URI (data:image/...;base64,...), or image_id UUID"}},"required":["url_or_data"]}`),
 		Fn: func(args map[string]any) string {
-			urlOrData, _ := args["url_or_data"].(string)
+			urlOrData := strArg(args, "url_or_data")
 			if urlOrData == "" {
 				return "Error: url_or_data is required"
 			}
@@ -147,71 +149,299 @@ func makeCoreTools(
 		},
 	}
 
-	// binaryExts are file extensions that must NOT be written via write_file.
-	// Binary files are produced by run_code (auto-exported) — never by text write.
+	// binaryExts: extensions blocked from write_file/write_code (binary files come from execute_python).
 	binaryExts := map[string]bool{
 		"png": true, "jpg": true, "jpeg": true, "gif": true, "webp": true,
 		"pdf": true, "xlsx": true, "xls": true, "docx": true, "doc": true,
 		"zip": true, "tar": true, "gz": true, "mp4": true, "mp3": true,
 	}
 
+	writeFileFn := func(args map[string]any) string {
+		filename := filepath.Base(strArg(args, "filename"))
+		content := strArg(args, "content")
+		if filename == "" || filename == "." {
+			return "Error: filename required"
+		}
+		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+		if binaryExts[ext] {
+			return fmt.Sprintf(
+				"Error: '%s' is binary — do NOT use write_file for it. "+
+					"Binary files are created by execute_python (save to /tmp, auto-exported). "+
+					"Use present_artifact('%s') to re-present an existing file.",
+				filename, filename)
+		}
+		mime := guessMime(filename)
+		art := putArtifact(sessionID, filename, []byte(content), mime)
+		emitFilePresent(eventCh, art)
+		n := strings.Count(content, "\n") + 1
+		return fmt.Sprintf("✅ Wrote '%s' (v%d, %d lines).", filename, art.Version, n)
+	}
+
+	// ── write_file ────────────────────────────────────────────────────────────
 	writeFile := ToolDef{
 		Name:        "write_file",
-		Description: "Write or update a TEXT file in the session. For binary outputs (PNG, PDF, Excel…) use run_code and save to /tmp — they are exported automatically.",
+		Description: "Write or update a text file (code, markdown, CSV, JSON, …) in the session. Auto-presents to user.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"content":{"type":"string"}},"required":["filename","content"]}`),
+		Fn:          writeFileFn,
+	}
+
+	// ── write_code — alias for write_file ─────────────────────────────────────
+	writeCode := ToolDef{
+		Name:        "write_code",
+		Description: "Save or update a script in the session. Alias for write_file — auto-presents.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"content":{"type":"string"}},"required":["filename","content"]}`),
+		Fn:          writeFileFn,
+	}
+
+	// errorHint is appended when execute_python/execute_file fails with no exports.
+	const errorHint = "\n\n💡 Failing code auto-saved as '.last_run.py'.\n" +
+		"   → read_code('.last_run.py')                            — inspect with line numbers\n" +
+		"   → grep_code('.last_run.py', pattern)                   — locate specific issue\n" +
+		"   → patch_code('.last_run.py', old, new) + execute_file('.last_run.py') — targeted fix"
+
+	// ── execute_python ────────────────────────────────────────────────────────
+	executePython := ToolDef{
+		Name: "execute_python",
+		Description: "Execute Python code in an isolated Docker sandbox. Returns stdout+stderr (timeout 90s). " +
+			"Preloaded: pandas, openpyxl, matplotlib, numpy, python-docx, pdfminer.six, Pillow, requests. " +
+			"NO network — pip install will fail. " +
+			"Files saved to /tmp are auto-exported as artifacts. " +
+			"User uploads available at /uploaded/<filename>. " +
+			"Failing code auto-saved as '.last_run.py'.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"code":{"type":"string","description":"Complete Python source code (include all imports, print outputs)"}},"required":["code"]}`),
 		Fn: func(args map[string]any) string {
-			filename, _ := args["filename"].(string)
-			content, _ := args["content"].(string)
-			if filename == "" {
-				return "Error: filename required"
+			code := strArg(args, "code")
+			if code == "" {
+				return "Error: code is required"
 			}
-			filename = filepath.Base(filename) // sanitize path
-			ext := ""
-			if dot := strings.LastIndex(filename, "."); dot >= 0 {
-				ext = strings.ToLower(filename[dot+1:])
+			fmt.Printf("[execute_python] %d chars session=%s\n", len(code), sessionID[:8])
+			output, hasError := executeCode(ctx, "python", code, sessionID, eventCh)
+			if hasError && sessionID != "" {
+				if strings.Contains(output, "📎 Exported:") {
+					output += "\n\n⚠️ Script exited with error but files were exported."
+				} else {
+					putArtifact(sessionID, ".last_run.py", []byte(code), "text/x-python")
+					output += errorHint
+				}
 			}
-			if binaryExts[ext] {
-				return fmt.Sprintf(
-					"Error: '%s' is a binary file type — do NOT use write_file for it. "+
-						"Binary files (PNG, PDF, Excel…) are created by run_code and auto-exported "+
-						"when saved to /tmp. Use present_file('%s') to re-present an existing file.",
-					filename, filename)
-			}
-			mime := guessMime(filename)
-			art := putArtifact(sessionID, filename, []byte(content), mime)
-			emitFilePresent(eventCh, art)
-			n := strings.Count(content, "\n") + 1
-			return fmt.Sprintf("✅ Wrote '%s' (v%d, %d lines).", filename, art.Version, n)
+			return output
 		},
 	}
 
+	// ── execute_file ──────────────────────────────────────────────────────────
+	executeFile := ToolDef{
+		Name:        "execute_file",
+		Description: "Execute a saved session file in the Docker sandbox.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string","description":"Filename in the session"}},"required":["filename"]}`),
+		Fn: func(args map[string]any) string {
+			filename := filepath.Base(strArg(args, "filename"))
+			if filename == "" || filename == "." {
+				return "Error: filename required"
+			}
+			art, errMsg := resolveTextArt(sessionID, filename)
+			if errMsg != "" {
+				return errMsg
+			}
+			lang := "python"
+			if strings.HasSuffix(filename, ".sh") {
+				lang = "bash"
+			}
+			fmt.Printf("[execute_file] %s (%d chars)\n", filename, len(art.Content))
+			output, hasError := executeCode(ctx, lang, art.TextContent(), sessionID, eventCh)
+			if hasError && sessionID != "" && !strings.Contains(output, "📎 Exported:") {
+				putArtifact(sessionID, ".last_run.py", art.Content, "text/x-python")
+				output += errorHint
+			}
+			return output
+		},
+	}
+
+	// ── read_code ─────────────────────────────────────────────────────────────
+	readCode := ToolDef{
+		Name:        "read_code",
+		Description: "Read a session or uploaded file with line numbers. Use start_line/end_line to read a range.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"start_line":{"type":"integer","description":"Start line 1-indexed (default 1)"},"end_line":{"type":"integer","description":"End line (default 500)"}},"required":["filename"]}`),
+		Fn: func(args map[string]any) string {
+			filename := filepath.Base(strArg(args, "filename"))
+			if filename == "" || filename == "." {
+				return "Error: filename required"
+			}
+			startLine := intArgDefault(args, "start_line", 1)
+			endLine := intArgDefault(args, "end_line", 500)
+			if startLine < 1 {
+				startLine = 1
+			}
+
+			// Session artifact first
+			art := getArtifact(sessionID, filename)
+			if art != nil {
+				if !art.IsText {
+					return fmt.Sprintf("'%s' là binary file (%s, %dB, v%d). Dùng present_artifact('%s') để xem.",
+						filename, art.MimeType, len(art.Content), art.Version, filename)
+				}
+				return sliceWithLineNumbers(art.TextContent(), filename, fmt.Sprintf("v%d", art.Version), startLine, endLine)
+			}
+
+			// Uploaded file fallback
+			upath := filepath.Join(sessionUploadDir(sessionID), filename)
+			if data, err := os.ReadFile(upath); err == nil {
+				ext := strings.ToLower(filepath.Ext(filename))
+				uploadBinExts := map[string]bool{
+					".xlsx": true, ".xls": true, ".pdf": true, ".zip": true,
+					".tar": true, ".gz": true, ".docx": true, ".doc": true, ".pptx": true, ".ppt": true,
+				}
+				if uploadBinExts[ext] {
+					fi, _ := os.Stat(upath)
+					size := int64(0)
+					if fi != nil {
+						size = fi.Size()
+					}
+					return fmt.Sprintf("Uploaded binary file '%s' (%d bytes) — available read-only at /uploaded/%s in execute_python.",
+						filename, size, filename)
+				}
+				return sliceWithLineNumbers(string(data), filename, "uploaded", startLine, endLine)
+			}
+
+			arts := listArtifacts(sessionID)
+			artNames := make([]string, 0, len(arts))
+			for _, a := range arts {
+				artNames = append(artNames, a.Filename)
+			}
+			return fmt.Sprintf("File '%s' not found. Session: %v. Uploaded: %v", filename, artNames, listUploadedFiles(sessionID))
+		},
+	}
+
+	// ── patch_code ────────────────────────────────────────────────────────────
+	patchCode := ToolDef{
+		Name:        "patch_code",
+		Description: "Apply a targeted text replacement in a session file. More precise than rewriting. Auto-presents the updated file.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"old_snippet":{"type":"string","description":"Exact text to replace"},"new_snippet":{"type":"string","description":"Replacement text"}},"required":["filename","old_snippet","new_snippet"]}`),
+		Fn: func(args map[string]any) string {
+			filename := filepath.Base(strArg(args, "filename"))
+			oldSnippet := strArg(args, "old_snippet")
+			newSnippet := strArg(args, "new_snippet")
+			if filename == "" || filename == "." || oldSnippet == "" {
+				return "Error: filename and old_snippet required"
+			}
+			art, errMsg := resolveTextArt(sessionID, filename)
+			if errMsg != "" {
+				return errMsg
+			}
+			content := art.TextContent()
+			if !strings.Contains(content, oldSnippet) {
+				return "❌ Snippet not found in '" + filename + "'. Current content:\n" + addLineNumbers(content)
+			}
+			newContent := strings.Replace(content, oldSnippet, newSnippet, 1)
+			newArt := putArtifact(sessionID, filename, []byte(newContent), art.MimeType)
+			emitFilePresent(eventCh, newArt)
+			n := strings.Count(newContent, "\n") + 1
+			return fmt.Sprintf("✅ Patched '%s' (v%d, %d lines). Run execute_file('%s') to retry.", filename, newArt.Version, n, filename)
+		},
+	}
+
+	// ── grep_code ─────────────────────────────────────────────────────────────
+	grepCode := ToolDef{
+		Name:        "grep_code",
+		Description: "Search for a regex pattern in a session file. Returns matching lines with line numbers.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"pattern":{"type":"string","description":"Regex pattern or literal string to search for"}},"required":["filename","pattern"]}`),
+		Fn: func(args map[string]any) string {
+			filename := filepath.Base(strArg(args, "filename"))
+			pattern := strArg(args, "pattern")
+			if filename == "" || filename == "." || pattern == "" {
+				return "Error: filename and pattern required"
+			}
+
+			// Resolve content
+			var text, sourceLabel string
+			art := getArtifact(sessionID, filename)
+			if art != nil {
+				if !art.IsText {
+					return fmt.Sprintf("'%s' is binary — cannot grep binary artifact.", filename)
+				}
+				text = art.TextContent()
+				sourceLabel = fmt.Sprintf("v%d", art.Version)
+			} else {
+				upath := filepath.Join(sessionUploadDir(sessionID), filename)
+				data, err := os.ReadFile(upath)
+				if err != nil {
+					arts := listArtifacts(sessionID)
+					artNames := make([]string, 0, len(arts))
+					for _, a := range arts {
+						artNames = append(artNames, a.Filename)
+					}
+					return fmt.Sprintf("File '%s' not found. Session: %v. Uploaded: %v", filename, artNames, listUploadedFiles(sessionID))
+				}
+				ext := strings.ToLower(filepath.Ext(filename))
+				grepBinExts := map[string]bool{
+					".xlsx": true, ".xls": true, ".pdf": true, ".zip": true,
+					".tar": true, ".gz": true, ".docx": true, ".doc": true,
+				}
+				if grepBinExts[ext] {
+					return fmt.Sprintf("'%s' is binary — cannot grep binary artifact.", filename)
+				}
+				text = string(data)
+				sourceLabel = "uploaded"
+			}
+
+			// Search
+			lines := strings.Split(text, "\n")
+			var matches []string
+			rx, rxErr := regexp.Compile(pattern)
+			for i, line := range lines {
+				var hit bool
+				if rxErr == nil {
+					hit = rx.MatchString(line)
+				} else {
+					hit = strings.Contains(line, pattern)
+				}
+				if hit {
+					matches = append(matches, fmt.Sprintf("%4d: %s", i+1, line))
+				}
+			}
+			if len(matches) == 0 {
+				return fmt.Sprintf("No matches for '%s' in '%s' (%s).", pattern, filename, sourceLabel)
+			}
+			return fmt.Sprintf("Matches in '%s' (%s, %d lines):\n%s", filename, sourceLabel, len(matches), strings.Join(matches, "\n"))
+		},
+	}
+
+	// ── list_workspace ────────────────────────────────────────────────────────
 	listWorkspace := ToolDef{
 		Name:        "list_workspace",
-		Description: "List all files currently in the session (written by the agent or exported from run_code).",
+		Description: "List all files in the session (written by agent, exported from Docker, or uploaded by user).",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 		Fn: func(_ map[string]any) string {
 			arts := listArtifacts(sessionID)
-			if len(arts) == 0 {
+			uploaded := listUploadedFiles(sessionID)
+			if len(arts) == 0 && len(uploaded) == 0 {
 				return "Session has no files."
 			}
 			var lines []string
 			for _, a := range arts {
-				lines = append(lines, fmt.Sprintf("  %s  (v%d, %dB, %s)", a.Filename, a.Version, len(a.Content), a.MimeType))
+				lines = append(lines, fmt.Sprintf("  %-30s (v%d, %s, %s)", a.Filename, a.Version, fmtSize(len(a.Content)), a.MimeType))
+			}
+			for _, name := range uploaded {
+				upath := filepath.Join(sessionUploadDir(sessionID), name)
+				size := 0
+				if fi, err := os.Stat(upath); err == nil {
+					size = int(fi.Size())
+				}
+				lines = append(lines, fmt.Sprintf("  /uploaded/%-20s (%s) [uploaded]", name, fmtSize(size)))
 			}
 			return "Session files:\n" + strings.Join(lines, "\n")
 		},
 	}
 
-	presentFile := ToolDef{
-		Name:        "present_file",
-		Description: "Re-present an existing session file to the user (e.g. show a chart or document again). Use when user asks to 'show again' or 'present' a file that was already created.",
+	// ── present_artifact ──────────────────────────────────────────────────────
+	presentArtifact := ToolDef{
+		Name:        "present_artifact",
+		Description: "Re-present an existing session file to the user. Use ONLY when user explicitly says 'show again' / 'present again'.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string","description":"Filename to re-present"}},"required":["filename"]}`),
 		Fn: func(args map[string]any) string {
-			filename, _ := args["filename"].(string)
-			if filename == "" {
+			filename := filepath.Base(strArg(args, "filename"))
+			if filename == "" || filename == "." {
 				return "Error: filename required"
 			}
-			filename = filepath.Base(filename)
 			art := getArtifact(sessionID, filename)
 			if art == nil {
 				arts := listArtifacts(sessionID)
@@ -229,25 +459,13 @@ func makeCoreTools(
 		},
 	}
 
-	runCode := ToolDef{
-		Name:        "run_code",
-		Description: "Execute code in an isolated Docker sandbox and return stdout + stderr. Preloaded: pandas, openpyxl, matplotlib, numpy, python-docx, pdfminer, Pillow. Files written to /tmp are automatically exported as artifacts.",
-		Parameters: json.RawMessage(`{"type":"object","properties":{"language":{"type":"string","enum":["python","bash"],"description":"python or bash"},"code":{"type":"string","description":"Full source code to execute"}},"required":["language","code"]}`),
-		Fn: func(args map[string]any) string {
-			language, _ := args["language"].(string)
-			code, _ := args["code"].(string)
-			if code == "" {
-				return "Error: code is required"
-			}
-			if language == "" {
-				language = "python"
-			}
-			fmt.Printf("[run_code] lang=%s (%d chars)\n", language, len(code))
-			return executeCode(ctx, language, code, sessionID, eventCh)
-		},
+	return []ToolDef{
+		loadSkill, webSearch, readImage,
+		writeFile, writeCode,
+		executePython, executeFile,
+		readCode, patchCode, grepCode,
+		listWorkspace, presentArtifact,
 	}
-
-	return []ToolDef{loadSkill, webSearch, readImage, writeFile, listWorkspace, presentFile, runCode}
 }
 
 // emitFilePresent sends file_present + artifact_content SSE events.
@@ -346,6 +564,106 @@ func intArg(args map[string]any, key string) int {
 		return n
 	}
 	return 0
+}
+
+func strArg(args map[string]any, key string) string {
+	s, _ := args[key].(string)
+	return s
+}
+
+func intArgDefault(args map[string]any, key string, def int) int {
+	v, ok := args[key]
+	if !ok {
+		return def
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	}
+	return def
+}
+
+// resolveTextArt resolves a filename to a text artifact.
+// Session registry is checked first; uploaded text files are auto-promoted so
+// patch_code / execute_file can operate on them.
+func resolveTextArt(sessionID, filename string) (*Artifact, string) {
+	if art := getArtifact(sessionID, filename); art != nil {
+		if !art.IsText {
+			return nil, fmt.Sprintf("'%s' là binary file — dùng execute_python để đọc.", filename)
+		}
+		return art, ""
+	}
+
+	upath := filepath.Join(sessionUploadDir(sessionID), filename)
+	data, err := os.ReadFile(upath)
+	if err != nil {
+		arts := listArtifacts(sessionID)
+		artNames := make([]string, 0, len(arts))
+		for _, a := range arts {
+			artNames = append(artNames, a.Filename)
+		}
+		return nil, fmt.Sprintf("File '%s' not found. Session: %v. Uploaded: %v",
+			filename, artNames, listUploadedFiles(sessionID))
+	}
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	uploadBinExts := map[string]bool{
+		".xlsx": true, ".xls": true, ".pdf": true, ".zip": true,
+		".tar": true, ".gz": true, ".docx": true, ".doc": true, ".pptx": true, ".ppt": true,
+	}
+	if uploadBinExts[ext] {
+		return nil, fmt.Sprintf("'%s' is a binary upload — use execute_python to process it at /uploaded/%s.", filename, filename)
+	}
+
+	// Auto-promote text upload to session registry.
+	art := putArtifact(sessionID, filename, data, guessMime(filename))
+	return art, ""
+}
+
+func listUploadedFiles(sessionID string) []string {
+	entries, err := os.ReadDir(sessionUploadDir(sessionID))
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+func sliceWithLineNumbers(content, filename, label string, startLine, endLine int) string {
+	lines := strings.Split(content, "\n")
+	total := len(lines)
+	if endLine <= 0 || endLine > total {
+		endLine = total
+	}
+	if startLine < 1 {
+		startLine = 1
+	}
+	if startLine > total {
+		return fmt.Sprintf("'%s' (%s) has %d lines — start_line %d out of range.", filename, label, total, startLine)
+	}
+	selected := lines[startLine-1 : endLine]
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "'%s' (%s) lines %d-%d / %d total:\n", filename, label, startLine, endLine, total)
+	for i, line := range selected {
+		fmt.Fprintf(&sb, "%4d: %s\n", startLine+i, line)
+	}
+	return sb.String()
+}
+
+func addLineNumbers(content string) string {
+	lines := strings.Split(content, "\n")
+	var sb strings.Builder
+	for i, line := range lines {
+		fmt.Fprintf(&sb, "%4d: %s\n", i+1, line)
+	}
+	return sb.String()
 }
 
 func toolListUsers(_ map[string]any) string {

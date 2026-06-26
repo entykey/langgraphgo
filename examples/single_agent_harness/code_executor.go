@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -43,14 +44,14 @@ const execExportPreamble = "import atexit as _axat,os as _axos,json as _axjson,s
 	"_axat.register(_ax_xp)\n" +
 	"del _axat,_axos,_axjson,_axsys,_axb64,_ax_xp\n\n"
 
-// executeCode runs code in a fresh Docker container and returns combined stdout+stderr.
+// executeCode runs code in a fresh Docker container and returns (output, hasError).
 // Language: "python" | "bash".
 // Streams lines to eventCh as tool_stream events.
 // Files written to /tmp by the code are automatically exported as session artifacts.
-func executeCode(ctx context.Context, language, code, sessionID string, eventCh chan<- SSEEvent) string {
+func executeCode(ctx context.Context, language, code, sessionID string, eventCh chan<- SSEEvent) (string, bool) {
 	// Check docker CLI is available
 	if _, err := exec.LookPath("docker"); err != nil {
-		return "Error: docker CLI not found in PATH. Install Docker Desktop and ensure it is running."
+		return "Error: docker CLI not found in PATH. Install Docker Desktop and ensure it is running.", true
 	}
 
 	var interp string
@@ -63,7 +64,7 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 		interp = "/bin/bash"
 		fullCode = code
 	default:
-		return fmt.Sprintf("Error: unsupported language '%s'. Supported: python, bash.", language)
+		return fmt.Sprintf("Error: unsupported language '%s'. Supported: python, bash.", language), true
 	}
 
 	// Write code to temp file — mounted into the container read-only.
@@ -73,12 +74,12 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 	}
 	tmp, err := os.CreateTemp("", "agent_code_*"+ext)
 	if err != nil {
-		return "Error creating temp file: " + err.Error()
+		return "Error creating temp file: " + err.Error(), true
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.WriteString(fullCode); err != nil {
 		tmp.Close()
-		return "Error writing code: " + err.Error()
+		return "Error writing code: " + err.Error(), true
 	}
 	tmp.Close()
 
@@ -103,12 +104,17 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 		"-v", tmp.Name() + ":/code" + ext + ":ro",
 	}
 
-	// Mount session upload directory if it exists.
+	// Mount session upload directory if it has files.
+	// Docker bind mounts require an absolute path — relative paths are treated as named volumes.
 	if sessionID != "" {
 		udir := sessionUploadDir(sessionID)
 		if entries, _ := os.ReadDir(udir); len(entries) > 0 {
-			dockerArgs = append(dockerArgs, "-v", udir+":/uploaded:ro")
-			fmt.Printf("[code_exec] mounting /uploaded from %s (%d files)\n", udir, len(entries))
+			absUdir, err := filepath.Abs(udir)
+			if err != nil {
+				absUdir = udir
+			}
+			dockerArgs = append(dockerArgs, "-v", absUdir+":/uploaded:ro")
+			fmt.Printf("[code_exec] mounting /uploaded from %s (%d files)\n", absUdir, len(entries))
 		}
 	}
 
@@ -121,7 +127,7 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "Error: " + err.Error()
+		return "Error: " + err.Error(), true
 	}
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
@@ -130,9 +136,9 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 		// Image not found is the most common failure.
 		if strings.Contains(startErr.Error(), "Unable to find image") ||
 			strings.Contains(startErr.Error(), "No such image") {
-			return fmt.Sprintf("Error: image '%s' not found.\nRun: .\\scripts\\build_agent_image.ps1", codeExecImage)
+			return fmt.Sprintf("Error: image '%s' not found.\nRun: .\\scripts\\build_agent_image.ps1", codeExecImage), true
 		}
-		return "Error starting container: " + startErr.Error()
+		return "Error starting container: " + startErr.Error(), true
 	}
 
 	// Stream stdout line-by-line.
@@ -148,10 +154,12 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 			continue // hide from output
 		}
 		outputLines = append(outputLines, line)
-		emit(eventCh, "tool_stream", map[string]string{"name": "run_code", "text": line + "\n"})
+		emit(eventCh, "tool_stream", map[string]string{"name": "execute_python", "text": line + "\n"})
 	}
 
+	var hasError bool
 	if waitErr := cmd.Wait(); waitErr != nil {
+		hasError = true
 		if runCtx.Err() == context.DeadlineExceeded {
 			outputLines = append(outputLines, fmt.Sprintf("\n⏱ Timeout: execution exceeded %s and was killed.", codeExecTimeout))
 		}
@@ -160,34 +168,40 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 
 	// Attach stderr if non-empty.
 	if s := stderrBuf.String(); s != "" {
+		hasError = true
 		outputLines = append(outputLines, "[stderr]")
 		outputLines = append(outputLines, strings.TrimRight(s, "\n"))
 	}
 
 	// Present exported files as session artifacts.
+	var exportedNames []string
 	if exportPayload != "" {
-		presentExportedFiles(sessionID, exportPayload, eventCh)
+		exportedNames = presentExportedFiles(sessionID, exportPayload, eventCh)
 	}
 
 	result := strings.Join(outputLines, "\n")
 	if strings.TrimSpace(result) == "" {
-		return "(no output)"
+		result = "(no output)"
 	}
 	if len(result) > codeExecMaxOutput {
 		result = result[:codeExecMaxOutput] + "\n… [truncated]"
 	}
-	return result
+	if len(exportedNames) > 0 {
+		result += "\n📎 Exported: " + strings.Join(exportedNames, ", ")
+	}
+	return result, hasError
 }
 
-// presentExportedFiles parses the __AGENT_EXPORT__ JSON payload and presents
-// each file as a session artifact, mirroring the Python lab's docker_export logic.
-func presentExportedFiles(sessionID, jsonPayload string, eventCh chan<- SSEEvent) {
+// presentExportedFiles parses the __AGENT_EXPORT__ JSON payload, presents each file
+// as a session artifact, and returns the list of presented filenames.
+func presentExportedFiles(sessionID, jsonPayload string, eventCh chan<- SSEEvent) []string {
 	var files map[string]string
 	if err := json.Unmarshal([]byte(jsonPayload), &files); err != nil {
 		fmt.Printf("[code_exec] export parse error: %v\n", err)
-		return
+		return nil
 	}
 	presented := map[string]bool{}
+	var names []string
 	for key, val := range files {
 		if strings.HasSuffix(key, "__bin__") {
 			continue
@@ -217,7 +231,9 @@ func presentExportedFiles(sessionID, jsonPayload string, eventCh chan<- SSEEvent
 		fmt.Printf("[code_exec] presenting exported file: %s (%dB)\n", key, len(raw))
 		art := putArtifact(sessionID, key, raw, mime)
 		emitFilePresent(eventCh, art)
+		names = append(names, key)
 	}
+	return names
 }
 
 // sessionUploadDir returns the host path where session file uploads are stored.
