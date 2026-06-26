@@ -32,6 +32,9 @@ type StateGraph[S any] struct {
 	// edges is a slice of Edge objects representing the connections between nodes
 	edges []Edge
 
+	// edgeIndex is built at Compile() time for O(1) next-node lookup in the hot path.
+	edgeIndex map[string][]string
+
 	// conditionalEdges contains a map between "From" node, while "To" node is derived based on the condition
 	conditionalEdges map[string]func(ctx context.Context, state S) string
 
@@ -144,9 +147,16 @@ func (g *StateGraph[S]) Compile() (*StateRunnable[S], error) {
 		return nil, ErrEntryPointNotSet
 	}
 
+	// Pre-build edge index for O(1) lookup per superstep instead of O(edges) linear scan.
+	idx := make(map[string][]string, len(g.nodes))
+	for _, edge := range g.edges {
+		idx[edge.From] = append(idx[edge.From], edge.To)
+	}
+	g.edgeIndex = idx
+
 	return &StateRunnable[S]{
 		graph:  g,
-		tracer: nil, // Initialize with no tracer
+		tracer: nil,
 	}, nil
 }
 
@@ -202,8 +212,11 @@ func (r *StateRunnable[S]) InvokeWithConfig(ctx context.Context, initialState S,
 		currentNodes = config.ResumeFrom
 	}
 
-	// Generate run ID for callbacks
-	runID := generateRunID()
+	// Generate run ID only when callbacks are actually present (avoids UUID alloc on hot path).
+	var runID string
+	if config != nil && len(config.Callbacks) > 0 {
+		runID = generateRunID()
+	}
 
 	// Notify callbacks of graph start
 	if config != nil {
@@ -236,14 +249,15 @@ func (r *StateRunnable[S]) InvokeWithConfig(ctx context.Context, initialState S,
 	}
 
 	for len(currentNodes) > 0 {
-		// Filter out END nodes
-		activeNodes := make([]string, 0, len(currentNodes))
+		// Filter END nodes in-place — avoids allocation on the common path (no END present).
+		j := 0
 		for _, node := range currentNodes {
 			if node != END {
-				activeNodes = append(activeNodes, node)
+				currentNodes[j] = node
+				j++
 			}
 		}
-		currentNodes = activeNodes
+		currentNodes = currentNodes[:j]
 
 		if len(currentNodes) == 0 {
 			break
@@ -488,10 +502,57 @@ func (r *StateRunnable[S]) calculateBackoffDelay(attempt int) time.Duration {
 
 // executeNodesParallel executes valid nodes in parallel and returns their results or errors.
 func (r *StateRunnable[S]) executeNodesParallel(ctx context.Context, nodes []string, state S, config *Config, runID string) ([]S, []error) {
-	var wg sync.WaitGroup
 	results := make([]S, len(nodes))
 	errorsList := make([]error, len(nodes))
 
+	// Fast path: skip goroutine + WaitGroup overhead for linear graphs (1 node per step).
+	if len(nodes) == 1 {
+		nodeName := nodes[0]
+		node, ok := r.graph.nodes[nodeName]
+		if !ok {
+			errorsList[0] = fmt.Errorf("%w: %s", ErrNodeNotFound, nodeName)
+			return results, errorsList
+		}
+		var nodeSpan *TraceSpan
+		if r.tracer != nil {
+			nodeSpan = r.tracer.StartSpan(ctx, TraceEventNodeStart, nodeName)
+			nodeSpan.State = state
+		}
+		res, err := r.executeNodeWithRetry(ctx, node, state)
+		if r.tracer != nil && nodeSpan != nil {
+			if err != nil {
+				r.tracer.EndSpan(ctx, nodeSpan, res, err)
+				errorSpan := r.tracer.StartSpan(ctx, TraceEventNodeError, nodeName)
+				errorSpan.Error = err
+				errorSpan.State = res
+				r.tracer.EndSpan(ctx, errorSpan, res, err)
+			} else {
+				r.tracer.EndSpan(ctx, nodeSpan, res, nil)
+			}
+		}
+		if err != nil {
+			var nodeInterrupt *NodeInterrupt
+			if errors.As(err, &nodeInterrupt) {
+				nodeInterrupt.Node = nodeName
+				results[0] = res
+			}
+			errorsList[0] = fmt.Errorf("error in node %s: %w", nodeName, err)
+			return results, errorsList
+		}
+		results[0] = res
+		if config != nil && len(config.Callbacks) > 0 {
+			nodeRunID := generateRunID()
+			serialized := map[string]any{"name": nodeName, "type": "tool"}
+			for _, cb := range config.Callbacks {
+				cb.OnToolStart(ctx, serialized, convertStateToString(res), nodeRunID, &runID, config.Tags, config.Metadata)
+				cb.OnToolEnd(ctx, convertStateToString(res), nodeRunID)
+			}
+		}
+		return results, errorsList
+	}
+
+	// Multiple nodes: run in parallel via goroutines.
+	var wg sync.WaitGroup
 	for i, nodeName := range nodes {
 		node, ok := r.graph.nodes[nodeName]
 		if !ok {
@@ -499,30 +560,22 @@ func (r *StateRunnable[S]) executeNodesParallel(ctx context.Context, nodes []str
 			continue
 		}
 
-		// Prepare variables for closure
 		idx := i
 		n := node
 		name := nodeName
 
 		SafeGo(&wg, func() {
-			// Start node tracing
 			var nodeSpan *TraceSpan
 			if r.tracer != nil {
 				nodeSpan = r.tracer.StartSpan(ctx, TraceEventNodeStart, name)
 				nodeSpan.State = state
 			}
 
-			var err error
-			var res S
+			res, err := r.executeNodeWithRetry(ctx, n, state)
 
-			// Execute node with retry logic
-			res, err = r.executeNodeWithRetry(ctx, n, state)
-
-			// End node tracing
 			if r.tracer != nil && nodeSpan != nil {
 				if err != nil {
 					r.tracer.EndSpan(ctx, nodeSpan, res, err)
-					// Also emit error event
 					errorSpan := r.tracer.StartSpan(ctx, TraceEventNodeError, name)
 					errorSpan.Error = err
 					errorSpan.State = res
@@ -536,7 +589,6 @@ func (r *StateRunnable[S]) executeNodesParallel(ctx context.Context, nodes []str
 				var nodeInterrupt *NodeInterrupt
 				if errors.As(err, &nodeInterrupt) {
 					nodeInterrupt.Node = name
-					// For NodeInterrupt, save the result so state updates are preserved
 					results[idx] = res
 				}
 				errorsList[idx] = fmt.Errorf("error in node %s: %w", name, err)
@@ -545,13 +597,9 @@ func (r *StateRunnable[S]) executeNodesParallel(ctx context.Context, nodes []str
 
 			results[idx] = res
 
-			// Notify callbacks of node execution (as tool)
 			if config != nil && len(config.Callbacks) > 0 {
 				nodeRunID := generateRunID()
-				serialized := map[string]any{
-					"name": name,
-					"type": "tool",
-				}
+				serialized := map[string]any{"name": name, "type": "tool"}
 				for _, cb := range config.Callbacks {
 					cb.OnToolStart(ctx, serialized, convertStateToString(res), nodeRunID, &runID, config.Tags, config.Metadata)
 					cb.OnToolEnd(ctx, convertStateToString(res), nodeRunID)
@@ -666,18 +714,13 @@ func (r *StateRunnable[S]) determineNextNodes(ctx context.Context, currentNodes 
 				}
 				nextNodesSet[nextNode] = true
 			} else {
-				// Then check regular edges
-				foundNext := false
-				for _, edge := range r.graph.edges {
-					if edge.From == nodeName {
-						nextNodesSet[edge.To] = true
-						foundNext = true
-						// Do NOT break here, to allow fan-out (multiple edges from same node)
-					}
-				}
-
+				// Use pre-built edge index (O(1) per node vs O(edges) linear scan).
+				targets, foundNext := r.graph.edgeIndex[nodeName]
 				if !foundNext {
 					return nil, fmt.Errorf("%w: %s", ErrNoOutgoingEdge, nodeName)
+				}
+				for _, to := range targets {
+					nextNodesSet[to] = true
 				}
 			}
 		}
