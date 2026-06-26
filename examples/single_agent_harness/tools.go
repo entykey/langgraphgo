@@ -815,9 +815,9 @@ func execToolsParallel(
 					args = map[string]any{}
 				}
 				toolSpanID := lfUUID()
-				globalLF.SpanStart(toolSpanID, traceID, parentSpanID, name, map[string]any{"args": truncate(tc.Function.Arguments, 300)})
+				globalLF.SpanStart(toolSpanID, traceID, parentSpanID, name, map[string]any{"args": truncate(tc.Function.Arguments, 2000)})
 				result = callWithRetry(def, args, eventCh)
-				globalLF.SpanEnd(toolSpanID, traceID, map[string]any{"result": truncate(result, 300)})
+				globalLF.SpanEnd(toolSpanID, traceID, map[string]any{"result": truncate(result, 5000)})
 			}
 			emit(eventCh, "tool_result", map[string]any{
 				"name":   name,

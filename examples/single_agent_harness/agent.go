@@ -265,7 +265,7 @@ func runAgentTurn(
 	}
 
 	globalLF.SpanEnd(spanID, traceID, map[string]any{
-		"answer":       truncate(fullText, 300),
+		"answer":       truncate(fullText, 2000),
 		"tools_called": toolsCalled,
 	})
 
