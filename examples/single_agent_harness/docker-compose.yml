@@ -58,6 +58,14 @@ services:
       - "3100:3000"
     environment:
       <<: *langfuse-env
+      # ── Headless auto-init (Langfuse v3) ─────────────────────────────────────
+      # These LANGFUSE_INIT_* vars run once at container startup (idempotent):
+      #   • Creates org + project with fixed IDs → same URLs survive stack restarts
+      #   • Injects LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY as the project API keys
+      #     so the Go agent can POST traces without any browser setup
+      #   • Creates the admin user (email/password for UI login at http://localhost:3100)
+      # No browser interaction is required — the stack is fully usable after `docker compose up -d`.
+      # Model pricing is seeded separately by the Go agent on startup (langfuse.go seedLangfuseModels).
       LANGFUSE_INIT_ORG_ID: sah-org
       LANGFUSE_INIT_ORG_NAME: "Single-Agent Harness"
       LANGFUSE_INIT_PROJECT_ID: sah-project

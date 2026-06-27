@@ -13,6 +13,28 @@ import (
 	"time"
 )
 
+// langfuseModels are seeded into Langfuse on startup to enable cost tracking.
+// Prices are per-token in USD; Langfuse multiplies by token counts automatically.
+// deepseek-v4-flash replaces deprecated deepseek-chat (same pricing).
+var langfuseModels = []map[string]any{
+	{
+		"modelName":           "deepseek-v4-flash",
+		"matchPattern":        `(?i)^(deepseek-chat|deepseek-v4-flash)$`,
+		"unit":                "TOKENS",
+		"inputPrice":          0.00000014,   // $0.14 / 1M  (cache miss)
+		"outputPrice":         0.00000028,   // $0.28 / 1M
+		"inputCacheReadPrice": 0.0000000028, // $0.0028 / 1M (cache hit)
+	},
+	{
+		"modelName":           "gemini-3.1-flash-lite",
+		"matchPattern":        `(?i)^(gemini/gemini-3\.1-flash-lite|gemini-3\.1-flash-lite)$`,
+		"unit":                "TOKENS",
+		"inputPrice":          0.00000025,   // $0.25 / 1M
+		"outputPrice":         0.0000015,    // $1.50 / 1M
+		"inputCacheReadPrice": 0.000000025,  // $0.025 / 1M (cache hit)
+	},
+}
+
 // LFClient sends traces to Langfuse via the batch ingestion REST API.
 // All calls are non-blocking — events are queued and flushed by a background goroutine.
 // This avoids the Python flush()-blocking-SSE-done problem entirely.
@@ -51,6 +73,9 @@ func initLangfuse() {
 	globalLF.wg.Add(1)
 	go globalLF.run()
 	fmt.Printf("[langfuse] enabled → %s\n", host)
+
+	// Seed model pricing in background — Langfuse may still be booting on fresh stack.
+	go globalLF.seedLangfuseModelsWithRetry()
 }
 
 // run batches queued events every 400ms or when 25 events accumulate.
@@ -175,6 +200,89 @@ func (c *LFClient) enqueue(eventType string, body map[string]any) {
 	}:
 	default:
 		// channel full — drop silently rather than block hot path
+	}
+}
+
+// seedLangfuseModelsWithRetry retries seeding up to 6 times with increasing back-off.
+// Mirrors the Python lab's lifespan retry loop.
+func (c *LFClient) seedLangfuseModelsWithRetry() {
+	for attempt := 1; attempt <= 6; attempt++ {
+		wait := time.Duration(attempt*3) * time.Second
+		time.Sleep(wait)
+		if c.tryHealthCheck() {
+			c.seedLangfuseModels()
+			return
+		}
+		fmt.Printf("[langfuse] seed attempt %d/6 — not ready yet, next in %ds\n", attempt, (attempt+1)*3)
+	}
+	fmt.Println("[langfuse] seed: all retries exhausted — model pricing not seeded")
+}
+
+// tryHealthCheck returns true if Langfuse responds to its health endpoint.
+func (c *LFClient) tryHealthCheck() bool {
+	req, err := http.NewRequest("GET", c.host+"/api/public/health", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
+// seedLangfuseModels POSTs model pricing into Langfuse if not already present. Idempotent.
+func (c *LFClient) seedLangfuseModels() {
+	// Fetch existing model names.
+	req, err := http.NewRequest("GET", c.host+"/api/public/models?limit=100", nil)
+	if err != nil {
+		fmt.Printf("[langfuse] seed: build request error: %v\n", err)
+		return
+	}
+	req.Header.Set("Authorization", c.authHeader)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("[langfuse] seed: GET models error: %v\n", err)
+		return
+	}
+	var listResp struct {
+		Data []struct {
+			ModelName string `json:"modelName"`
+		} `json:"data"`
+	}
+	json.NewDecoder(resp.Body).Decode(&listResp) //nolint:errcheck
+	resp.Body.Close()
+
+	existing := map[string]bool{}
+	for _, m := range listResp.Data {
+		existing[m.ModelName] = true
+	}
+
+	for _, model := range langfuseModels {
+		name, _ := model["modelName"].(string)
+		if existing[name] {
+			fmt.Printf("[langfuse] model %q already exists — skipping\n", name)
+			continue
+		}
+		b, _ := json.Marshal(model)
+		req, err := http.NewRequest("POST", c.host+"/api/public/models", bytes.NewReader(b))
+		if err != nil {
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", c.authHeader)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			fmt.Printf("[langfuse] seed error for %q: %v\n", name, err)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == 200 || resp.StatusCode == 201 {
+			fmt.Printf("[langfuse] seeded model pricing: %q\n", name)
+		} else {
+			fmt.Printf("[langfuse] failed to seed %q: HTTP %d\n", name, resp.StatusCode)
+		}
 	}
 }
 
