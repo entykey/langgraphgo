@@ -48,6 +48,10 @@ const execExportPreamble = "import atexit as _axat,os as _axos,json as _axjson,s
 // Language: "python" | "bash".
 // Streams lines to eventCh as tool_stream events.
 // Files written to /tmp by the code are automatically exported as session artifacts.
+//
+// Code is passed via stdin (-i flag) instead of a temp-file bind mount.
+// This avoids Docker-in-Docker issues where os.CreateTemp creates a file inside
+// the agent container at a path the host Docker daemon cannot see.
 func executeCode(ctx context.Context, language, code, sessionID string, eventCh chan<- SSEEvent) (string, bool) {
 	// Check docker CLI is available
 	if _, err := exec.LookPath("docker"); err != nil {
@@ -67,22 +71,6 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 		return fmt.Sprintf("Error: unsupported language '%s'. Supported: python, bash.", language), true
 	}
 
-	// Write code to temp file — mounted into the container read-only.
-	ext := ".py"
-	if interp != "python3" {
-		ext = ".sh"
-	}
-	tmp, err := os.CreateTemp("", "agent_code_*"+ext)
-	if err != nil {
-		return "Error creating temp file: " + err.Error(), true
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.WriteString(fullCode); err != nil {
-		tmp.Close()
-		return "Error writing code: " + err.Error(), true
-	}
-	tmp.Close()
-
 	// Build docker run command.
 	// Security flags mirror the Python lab:
 	//   -m 512m          — memory cap
@@ -92,16 +80,16 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 	//   --security-opt no-new-privileges
 	//   --network none   — no outbound network (agent uses web_search instead)
 	// /tmp is a writable tmpfs so code can create output files.
-	// /code is the user script, mounted read-only.
+	// -i pipes code via stdin — no temp-file bind mount needed.
 	dockerArgs := []string{
-		"run", "--rm",
+		"run", "--rm", "-i",
 		"-m", "512m",
 		"--cpus", "1",
 		"--pids-limit", "128",
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
+		"--network", "none",
 		"--tmpfs", "/tmp:exec,size=256m",
-		"-v", tmp.Name() + ":/code" + ext + ":ro",
 	}
 
 	// Mount session upload directory if it has files.
@@ -117,12 +105,22 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 		}
 	}
 
-	dockerArgs = append(dockerArgs, codeExecImage, interp, "/code"+ext)
+	// Pass the interpreter command — python3 reads from stdin when given "-" as filename.
+	var interpArgs []string
+	switch interp {
+	case "python3":
+		interpArgs = []string{interp, "-"}
+	default: // bash
+		interpArgs = []string{interp}
+	}
+	dockerArgs = append(dockerArgs, codeExecImage)
+	dockerArgs = append(dockerArgs, interpArgs...)
 
 	runCtx, cancel := context.WithTimeout(ctx, codeExecTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, "docker", dockerArgs...)
+	cmd.Stdin = strings.NewReader(fullCode)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
