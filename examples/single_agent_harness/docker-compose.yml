@@ -210,6 +210,14 @@ services:
         condition: service_completed_successfully  # bucket sah-artifacts must exist first
     volumes:
       - sah_uploads:/app/tmp/uploads
+      # Docker socket — required so the agent can spawn code-execution sandbox containers.
+      # Linux / WSL2:  /var/run/docker.sock:/var/run/docker.sock
+      # Windows pipe:  use type:npipe form (see below) if the line above doesn't work.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Windows named-pipe alternative (uncomment if on bare Windows host without WSL2):
+      # - type: npipe
+      #   source: \\.\pipe\docker_engine
+      #   target: \\.\pipe\docker_engine
     restart: unless-stopped
 
 volumes:

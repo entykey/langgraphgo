@@ -20,6 +20,10 @@ type ToolDef struct {
 	Description string
 	Parameters  json.RawMessage
 	Fn          func(args map[string]any) string
+	// NoRetry disables callWithRetry for this tool.
+	// Set for deterministic tools where the same input always produces the same result
+	// (e.g. code execution — retrying identical code is pointless and hides the real error).
+	NoRetry bool
 }
 
 // ── Skill system ──────────────────────────────────────────────────────────────
@@ -201,7 +205,8 @@ func makeCoreTools(
 
 	// ── execute_python ────────────────────────────────────────────────────────
 	executePython := ToolDef{
-		Name: "execute_python",
+		NoRetry: true, // same code → same error; retry masks the real failure
+		Name:    "execute_python",
 		Description: "Execute Python code in an isolated Docker sandbox. Returns stdout+stderr (timeout 90s). " +
 			"Preloaded: pandas, openpyxl, matplotlib, numpy, python-docx, pdfminer.six, Pillow, requests. " +
 			"NO network — pip install will fail. " +
@@ -230,6 +235,7 @@ func makeCoreTools(
 
 	// ── execute_file ──────────────────────────────────────────────────────────
 	executeFile := ToolDef{
+		NoRetry:     true,
 		Name:        "execute_file",
 		Description: "Execute a saved session file in the Docker sandbox.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string","description":"Filename in the session"}},"required":["filename"]}`),
@@ -832,23 +838,32 @@ func execToolsParallel(
 }
 
 func callWithRetry(def ToolDef, args map[string]any, ch chan<- SSEEvent) string {
-	for attempt := 1; attempt <= 3; attempt++ {
-		result := func() (r string) {
-			defer func() {
-				if rec := recover(); rec != nil {
-					r = fmt.Sprintf("tool panic: %v", rec)
-				}
-			}()
-			return def.Fn(args)
+	call := func() (r string) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				r = fmt.Sprintf("tool panic: %v", rec)
+			}
 		}()
-		if !strings.HasPrefix(result, "Error:") {
-			return result
+		return def.Fn(args)
+	}
+
+	// Deterministic tools (code execution, file ops) — never retry; return real error to LLM.
+	if def.NoRetry {
+		return call()
+	}
+
+	// Transient tools (web_search, HTTP calls) — retry up to 3x on "Error:" prefix.
+	var last string
+	for attempt := 1; attempt <= 3; attempt++ {
+		last = call()
+		if !strings.HasPrefix(last, "Error:") {
+			return last
 		}
 		if attempt < 3 {
 			emit(ch, "tool_retry", map[string]string{"info": fmt.Sprintf("%s (%d/3)", def.Name, attempt)})
 		}
 	}
-	return fmt.Sprintf("[TOOL ERROR] %s failed after 3 attempts", def.Name)
+	return last // return the actual error, not a generic wrapper
 }
 
 // ── String helpers ────────────────────────────────────────────────────────────

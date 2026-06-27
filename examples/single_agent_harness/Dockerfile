@@ -42,10 +42,11 @@ RUN --mount=type=cache,target=/root/go/pkg/mod \
 # ── Stage 2: Runtime ──────────────────────────────────────────────────────────
 FROM alpine:3.21
 
-# ca-certificates: needed for HTTPS calls to DeepSeek / Gemini / Langfuse
+# ca-certificates: HTTPS to DeepSeek / Gemini / Langfuse
 # tzdata: correct time zones in logs
-RUN apk add --no-cache ca-certificates tzdata && \
-    addgroup -S sah && adduser -S -G sah sah
+# docker-cli: needed to spawn the code-execution sandbox container
+# Note: runs as root so it can access the Docker socket mounted at runtime.
+RUN apk add --no-cache ca-certificates tzdata docker-cli
 
 WORKDIR /app
 
@@ -54,9 +55,8 @@ COPY examples/single_agent_harness/static ./static
 COPY examples/single_agent_harness/skills  ./skills
 
 # Upload dir for session file uploads (mounted as a volume in production).
-RUN mkdir -p /app/tmp/uploads && chown -R sah:sah /app
+RUN mkdir -p /app/tmp/uploads
 
-USER sah
 EXPOSE 8080
 
 # UPLOAD_DIR tells the agent where to store session uploads inside the container.
