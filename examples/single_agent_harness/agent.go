@@ -34,9 +34,13 @@ CORE TOOLS (luôn có sẵn, không cần load skill):
 - web_search(query)                               → tìm kiếm web, tin tức, giá cả, thông tin thực tế
 - read_image(url_or_data)                         → phân tích ảnh bằng vision
   • Khi user message chứa [Ảnh đính kèm — gọi read_image("<id>")...], gọi read_image với id đó
+- read_excel(filename, sheet_name?, max_rows=50)  → đọc Excel KHÔNG cần Docker — NHANH, thấy merged cells
 - execute_python(code)                            → chạy Python trong sandbox Docker; tự lưu .last_run.py khi lỗi
 - write_file(filename, content)                   → viết text file — TỰ ĐỘNG present
 - write_code(filename, content)                   → alias của write_file — TỰ ĐỘNG present
+- write_binary_file(filename, base64_content)     → viết binary file từ base64 — TỰ ĐỘNG present
+- edit_xlsx(filename, instruction)                → stage Excel vào /uploaded/ để viết openpyxl code sửa
+- zip_files(filenames, zip_name)                  → đóng gói nhiều file — TỰ ĐỘNG present
 - read_code(filename, start_line=1, end_line=500) → đọc file với line numbers
 - execute_file(filename)                          → chạy file đã lưu trong Docker sandbox
 - list_workspace()                                → liệt kê tất cả file trong session
@@ -49,6 +53,10 @@ Có sẵn: pandas, openpyxl, matplotlib, numpy, python-docx (import docx),
   pdfminer.six (from pdfminer.high_level import extract_text), Pillow (PIL), requests
 KHÔNG có network — pip install SẼ THẤT BẠI. Báo user thêm vào base image nếu cần.
 File user upload có sẵn tại /uploaded/<filename> — đọc trực tiếp bằng pandas/open().
+
+FILE READING — chọn đúng tool:
+- read_excel → câu hỏi ĐỌC đơn giản (xem sheet, xem vài dòng, kiểm tra merged cells). Không cần Docker, rất nhanh.
+- execute_python / edit_xlsx → tính toán, transform, SỬA file.
 
 FILE GENERATION: Viết output vào /tmp/<filename>. File /tmp TỰ ĐỘNG present — KHÔNG gọi
 present_artifact sau execute_python/execute_file.

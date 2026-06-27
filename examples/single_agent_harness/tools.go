@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +14,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/xuri/excelize/v2"
 )
 
 // ToolDef describes a callable function tool for DeepSeek function calling.
@@ -465,10 +469,224 @@ func makeCoreTools(
 		},
 	}
 
+	// ── write_binary_file ────────────────────────────────────────────────────
+	writeBinaryFile := ToolDef{
+		Name:        "write_binary_file",
+		Description: "Write a binary file (xlsx, pdf, zip, png, …) already encoded as base64. Use when you have raw bytes to store directly — auto-presents.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"base64_content":{"type":"string"}},"required":["filename","base64_content"]}`),
+		Fn: func(args map[string]any) string {
+			filename := strArg(args, "filename")
+			b64 := strArg(args, "base64_content")
+			if filename == "" || b64 == "" {
+				return "Error: filename and base64_content required."
+			}
+			raw, err := base64.StdEncoding.DecodeString(b64)
+			if err != nil {
+				raw, err = base64.RawStdEncoding.DecodeString(b64)
+				if err != nil {
+					return "Error: invalid base64 — " + err.Error()
+				}
+			}
+			mime := guessMime(filepath.Base(filename))
+			art := putArtifact(sessionID, filepath.Base(filename), raw, mime)
+			emitFilePresent(eventCh, art)
+			return fmt.Sprintf("✅ Wrote and presented '%s' (v%d, %dB).", art.Filename, art.Version, len(art.Content))
+		},
+	}
+
+	// ── zip_files ─────────────────────────────────────────────────────────────
+	zipFiles := ToolDef{
+		Name:        "zip_files",
+		Description: "Pack multiple session files into a single .zip and present it. Use when the user asks to bundle/download all files.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filenames":{"type":"array","items":{"type":"string"}},"zip_name":{"type":"string"}},"required":["filenames","zip_name"]}`),
+		Fn: func(args map[string]any) string {
+			zipName := strArg(args, "zip_name")
+			if zipName == "" {
+				zipName = "archive.zip"
+			}
+			var filenames []string
+			if raw, ok := args["filenames"]; ok {
+				switch v := raw.(type) {
+				case []any:
+					for _, item := range v {
+						if s, ok := item.(string); ok {
+							filenames = append(filenames, s)
+						}
+					}
+				case []string:
+					filenames = v
+				}
+			}
+			if len(filenames) == 0 {
+				return "Error: filenames list is empty."
+			}
+			var buf bytes.Buffer
+			zw := zip.NewWriter(&buf)
+			var packed, missing []string
+			for _, fname := range filenames {
+				art := getArtifact(sessionID, filepath.Base(fname))
+				if art == nil {
+					missing = append(missing, fname)
+					continue
+				}
+				w, err := zw.Create(art.Filename)
+				if err != nil {
+					continue
+				}
+				w.Write(art.Content) //nolint:errcheck
+				packed = append(packed, art.Filename)
+			}
+			zw.Close()
+			if len(packed) == 0 {
+				return fmt.Sprintf("Không tìm thấy file nào: %v", missing)
+			}
+			zipArt := putArtifact(sessionID, zipName, buf.Bytes(), "application/zip")
+			emitFilePresent(eventCh, zipArt)
+			msg := fmt.Sprintf("✅ Đã đóng gói %d file vào '%s' và present.", len(packed), zipName)
+			if len(missing) > 0 {
+				msg += fmt.Sprintf(" Không tìm thấy: %v.", missing)
+			}
+			return msg
+		},
+	}
+
+	// ── edit_xlsx ─────────────────────────────────────────────────────────────
+	editXlsx := ToolDef{
+		Name: "edit_xlsx",
+		Description: "Stage an Excel file from the session into /uploaded/<filename> in the Docker sandbox so you can write openpyxl code to read, edit, and save to /tmp/<filename>. " +
+			"Call execute_python() with the openpyxl code immediately after.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"instruction":{"type":"string"}},"required":["filename","instruction"]}`),
+		Fn: func(args map[string]any) string {
+			filename := strArg(args, "filename")
+			instruction := strArg(args, "instruction")
+			if filename == "" {
+				return "Error: filename required."
+			}
+			fname := filepath.Base(filename)
+			art := getArtifact(sessionID, fname)
+			if art == nil {
+				var names []string
+				for _, a := range listArtifacts(sessionID) {
+					names = append(names, a.Filename)
+				}
+				return fmt.Sprintf("File '%s' không tìm thấy trong session. Có sẵn: %v", fname, names)
+			}
+			// Write into the session upload dir so Docker can mount it.
+			udir := sessionUploadDir(sessionID)
+			if err := os.MkdirAll(udir, 0o755); err != nil {
+				return "Error creating upload dir: " + err.Error()
+			}
+			dest := filepath.Join(udir, fname)
+			if err := os.WriteFile(dest, art.Content, 0o644); err != nil {
+				return "Error staging file: " + err.Error()
+			}
+			return fmt.Sprintf(
+				"File '%s' (v%d, %dB) đã sẵn sàng tại /uploaded/%s trong Docker.\n"+
+					"Hướng dẫn sửa: %s\n"+
+					"Bước tiếp: gọi execute_python() với code openpyxl đọc từ '/uploaded/%s', "+
+					"áp dụng thay đổi, lưu kết quả vào '/tmp/%s'. File output sẽ tự động present.",
+				fname, art.Version, len(art.Content), fname,
+				instruction,
+				fname, fname,
+			)
+		},
+	}
+
+	// ── read_excel ────────────────────────────────────────────────────────────
+	readExcel := ToolDef{
+		Name: "read_excel",
+		Description: "Đọc nhanh nội dung file Excel (.xlsx/.xls) — KHÔNG cần Docker, KHÔNG cần viết code. " +
+			"Dùng cho: xem có mấy sheet, preview dữ liệu, xem cấu trúc cột, merged cells, đọc vài dòng đầu. " +
+			"Nếu cần TÍNH TOÁN, lọc phức tạp, hoặc SỬA file → dùng execute_python hoặc edit_xlsx.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"sheet_name":{"type":"string"},"max_rows":{"type":"integer"}},"required":["filename"]}`),
+		Fn: func(args map[string]any) string {
+			filename := strArg(args, "filename")
+			sheetName := strArg(args, "sheet_name")
+			maxRows := intArgDefault(args, "max_rows", 50)
+			if maxRows <= 0 {
+				maxRows = 50
+			}
+			if filename == "" {
+				return "Error: filename required."
+			}
+			fname := filepath.Base(filename)
+
+			// Resolve bytes: session artifact first, then uploaded file.
+			var raw []byte
+			if art := getArtifact(sessionID, fname); art != nil {
+				raw = art.Content
+			} else {
+				upath := filepath.Join(sessionUploadDir(sessionID), fname)
+				var err error
+				raw, err = os.ReadFile(upath)
+				if err != nil {
+					var artNames []string
+					for _, a := range listArtifacts(sessionID) {
+						artNames = append(artNames, a.Filename)
+					}
+					return fmt.Sprintf("File '%s' không tìm thấy. Session: %v. Uploaded: check /uploaded/.", fname, artNames)
+				}
+			}
+
+			f, err := excelize.OpenReader(bytes.NewReader(raw))
+			if err != nil {
+				return fmt.Sprintf("Lỗi đọc file Excel: %v. File có thể bị hỏng hoặc không đúng format xlsx.", err)
+			}
+			defer f.Close()
+
+			sheets := f.GetSheetList()
+			var out strings.Builder
+			fmt.Fprintf(&out, "Workbook '%s': %d sheet(s): %v\n", fname, len(sheets), sheets)
+
+			sheetsToRead := sheets
+			if sheetName != "" {
+				sheetsToRead = []string{sheetName}
+			}
+
+			for _, sname := range sheetsToRead {
+				rows, err := f.GetRows(sname)
+				if err != nil {
+					fmt.Fprintf(&out, "\n## Sheet '%s': lỗi đọc — %v\n", sname, err)
+					continue
+				}
+				fmt.Fprintf(&out, "\n## Sheet: %s\n", sname)
+
+				// Report merged cells so agent knows about them before writing openpyxl code.
+				merges, _ := f.GetMergeCells(sname)
+				if len(merges) > 0 {
+					fmt.Fprintf(&out, "[Merged cells: ")
+					for i, m := range merges {
+						if i > 0 {
+							out.WriteString(", ")
+						}
+						fmt.Fprintf(&out, "%s→%s", m.GetStartAxis(), m.GetEndAxis())
+					}
+					out.WriteString("]\n")
+				}
+
+				rowCount := 0
+				for _, row := range rows {
+					if rowCount >= maxRows {
+						fmt.Fprintf(&out, "... [đã đọc %d dòng, còn nữa — tăng max_rows nếu cần]\n", maxRows)
+						break
+					}
+					if len(row) == 0 {
+						continue
+					}
+					out.WriteString(strings.Join(row, "\t"))
+					out.WriteByte('\n')
+					rowCount++
+				}
+				fmt.Fprintf(&out, "[%d dòng đã đọc trong sheet này]\n", rowCount)
+			}
+			return out.String()
+		},
+	}
+
 	return []ToolDef{
 		loadSkill, webSearch, readImage,
-		writeFile, writeCode,
-		executePython, executeFile,
+		writeFile, writeCode, writeBinaryFile, zipFiles, editXlsx,
+		readExcel, executePython, executeFile,
 		readCode, patchCode, grepCode,
 		listWorkspace, presentArtifact,
 	}
