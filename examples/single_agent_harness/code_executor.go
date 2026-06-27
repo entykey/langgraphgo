@@ -105,16 +105,15 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 	}
 
 	// Mount session upload directory if it has files.
-	// Docker bind mounts require an absolute path — relative paths are treated as named volumes.
+	// Docker bind mounts require a HOST-side absolute path.
+	// When the Go agent itself runs inside Docker, its internal path (e.g. /app/tmp/uploads/...)
+	// is not visible to the host Docker daemon — UPLOAD_HOST_DIR provides the host-side path.
 	if sessionID != "" {
 		udir := sessionUploadDir(sessionID)
 		if entries, _ := os.ReadDir(udir); len(entries) > 0 {
-			absUdir, err := filepath.Abs(udir)
-			if err != nil {
-				absUdir = udir
-			}
-			dockerArgs = append(dockerArgs, "-v", absUdir+":/uploaded:ro")
-			fmt.Printf("[code_exec] mounting /uploaded from %s (%d files)\n", absUdir, len(entries))
+			hostSrc := uploadHostMountSrc(sessionID)
+			dockerArgs = append(dockerArgs, "-v", hostSrc+":/uploaded:ro")
+			fmt.Printf("[code_exec] mounting /uploaded from %s (%d files)\n", hostSrc, len(entries))
 		}
 	}
 
@@ -236,9 +235,27 @@ func presentExportedFiles(sessionID, jsonPayload string, eventCh chan<- SSEEvent
 	return names
 }
 
-// sessionUploadDir returns the host path where session file uploads are stored.
-// These are mounted read-only at /uploaded inside the Docker container.
+// sessionUploadDir returns the container-local path where session uploads are stored.
 func sessionUploadDir(sessionID string) string {
 	base := getEnv("UPLOAD_DIR", "tmp/uploads")
 	return base + "/" + sessionID
+}
+
+// uploadHostMountSrc returns the HOST-side path to use as the bind-mount source
+// when spawning sandbox containers via the Docker socket.
+//
+// When the Go agent runs on the host: filepath.Abs gives the real host path.
+// When it runs inside Docker: the internal path (/app/tmp/uploads/…) is unknown
+// to the host Docker daemon — UPLOAD_HOST_DIR must be set to the host-side path
+// that maps to UPLOAD_DIR inside the container (e.g. via a bind mount in compose).
+func uploadHostMountSrc(sessionID string) string {
+	if hostDir := os.Getenv("UPLOAD_HOST_DIR"); hostDir != "" {
+		return filepath.Join(hostDir, sessionID)
+	}
+	// Running on host — compute absolute path from the working directory.
+	abs, err := filepath.Abs(sessionUploadDir(sessionID))
+	if err != nil {
+		return sessionUploadDir(sessionID)
+	}
+	return abs
 }

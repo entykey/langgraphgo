@@ -197,6 +197,13 @@ services:
     environment:
       LANGFUSE_HOST: http://sah-langfuse-web:3000   # internal Docker network — NOT localhost:3100
       UPLOAD_DIR: /app/tmp/uploads
+      # UPLOAD_HOST_DIR is the Docker-HOST-side path that maps to UPLOAD_DIR inside this container.
+      # Required for sandbox containers spawned via the Docker socket: docker run -v <host_path>:/uploaded
+      # must reference a path on the HOST filesystem, not the inner container's filesystem.
+      # Set SAH_UPLOAD_HOST_DIR in your .env to the absolute host path of the uploads folder.
+      # Example (Windows):  SAH_UPLOAD_HOST_DIR=D:\tuan_dev\go_projects\langgraphgo\examples\single_agent_harness\tmp\uploads
+      # Example (Linux/Mac): SAH_UPLOAD_HOST_DIR=/home/user/langgraphgo/examples/single_agent_harness/tmp/uploads
+      UPLOAD_HOST_DIR: ${SAH_UPLOAD_HOST_DIR}
       MINIO_ENDPOINT: sah-minio:9000               # internal — no http:// prefix for minio-go
       MINIO_ACCESS_KEY: minio
       MINIO_SECRET_KEY: ${SAH_MINIO_PASSWORD:-sah_minio_pw}
@@ -209,10 +216,10 @@ services:
       sah-minio-init:
         condition: service_completed_successfully  # bucket sah-artifacts must exist first
     volumes:
-      - sah_uploads:/app/tmp/uploads
+      # Bind mount (not named volume) so the host path is predictable for sandbox spawning.
+      # SAH_UPLOAD_HOST_DIR must match this source path.
+      - ${SAH_UPLOAD_HOST_DIR:-./tmp/uploads}:/app/tmp/uploads
       # Docker socket — required so the agent can spawn code-execution sandbox containers.
-      # Linux / WSL2:  /var/run/docker.sock:/var/run/docker.sock
-      # Windows pipe:  use type:npipe form (see below) if the line above doesn't work.
       - /var/run/docker.sock:/var/run/docker.sock
       # Windows named-pipe alternative (uncomment if on bare Windows host without WSL2):
       # - type: npipe
@@ -225,4 +232,4 @@ volumes:
   sah_clickhouse:
   sah_redis:
   sah_minio:
-  sah_uploads:
+  # sah_uploads removed — replaced by bind mount (${SAH_UPLOAD_HOST_DIR:-./tmp/uploads})
