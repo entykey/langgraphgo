@@ -197,11 +197,17 @@ services:
     environment:
       LANGFUSE_HOST: http://sah-langfuse-web:3000   # internal Docker network — NOT localhost:3100
       UPLOAD_DIR: /app/tmp/uploads
+      MINIO_ENDPOINT: sah-minio:9000               # internal — no http:// prefix for minio-go
+      MINIO_ACCESS_KEY: minio
+      MINIO_SECRET_KEY: ${SAH_MINIO_PASSWORD:-sah_minio_pw}
+      MINIO_BUCKET: sah-artifacts
     ports:
       - "8080:8080"
     depends_on:
       sah-langfuse-web:
         condition: service_started
+      sah-minio-init:
+        condition: service_completed_successfully  # bucket sah-artifacts must exist first
     volumes:
       - sah_uploads:/app/tmp/uploads
     restart: unless-stopped
