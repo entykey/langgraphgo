@@ -99,34 +99,100 @@ def border_range(ws, r1, c1, r2, c2, bdr):
 
 ---
 
-## 3. LAYOUT — tránh ô bị tràn chữ
+## 3. LAYOUT — tránh `####` và chữ bị cắt
 
-**Nguyên tắc: không copy-paste magic numbers — reason về nội dung thực tế.**
+**openpyxl KHÔNG tự động điều chỉnh column width hay row height — phải set thủ công 100%.**
+
+### 3a. Column width — tránh `####`
+
+`####` xuất hiện khi cột quá hẹp để hiển thị số. Rule:
 
 ```python
-# ── Độ rộng cột ──────────────────────────────────────────────────────────
-# Quyết định dựa trên nội dung sẽ điền vào từng cột:
-#   - Cột số thứ tự / mã ngắn: 4–6
-#   - Cột label / tên ngắn (10–15 ký tự): 12–18
-#   - Cột mô tả dài (tên hàng, địa chỉ): ước tính độ dài text / 2, tối thiểu 30
-#   - Cột số tiền (định dạng #,##0): 14–18 (đủ chứa 12 chữ số + dấu phân cách)
-for col_idx, width in col_widths.items():   # col_widths do bạn tự định nghĩa theo nội dung
-    ws.column_dimensions[get_column_letter(col_idx)].width = width
+import math
 
-# ── Chiều cao dòng ────────────────────────────────────────────────────────
-# BẮT BUỘC set thủ công khi dùng wrap_text=True, vì openpyxl không tự tính.
-# Ước tính: (số ký tự nội dung / độ rộng cột) × 15 + 5, tối thiểu 20.
+def col_width_for_number(max_value, number_format='#,##0'):
+    """Tính width tối thiểu cho cột số dựa trên giá trị lớn nhất."""
+    # Số chữ số + dấu phân cách ngàn + padding Excel (~2)
+    formatted_len = len(f'{max_value:,.0f}') + 2
+    return max(formatted_len, 10)   # tối thiểu 10
+
+def col_width_for_text(texts, col_width_hint=None):
+    """Tính width cho cột text dựa trên nội dung thực tế."""
+    max_len = max((len(str(t)) for t in texts if t), default=10)
+    if col_width_hint:
+        # Nếu có wrap_text: width tùy ý, nhưng row height phải tăng tương ứng
+        return col_width_hint
+    return min(max_len + 2, 60)   # không quá 60, cộng 2 padding
+
 # Ví dụ:
-#   - Dòng tiêu đề đơn: ~20–24
-#   - Dòng tiêu đề lớn (font size 14–16): ~30–38
-#   - Dòng header bảng có 2 dòng text: ~36–44
-#   - Dòng data tên hàng dài (wrap): 24–32 tùy độ dài text và col width
-ws.row_dimensions[r].height = <giá_trị_tính_theo_nội_dung>
+# Cột số tiền max 259,490,000 → len("259,490,000") = 11, +2 = 13 → width 13–16
+# Cột tên hàng max 45 ký tự → width 30 + wrap_text → phải set row height
+```
 
-# ── Alignment ────────────────────────────────────────────────────────────
+**Rule nhanh:**
+- Cột số (`#,##0`): width = `len(str(max_value)) + len(dấu phẩy) + 3`, tối thiểu 12
+- Cột text không wrap: width = `len(text dài nhất) + 2`
+- Cột text có wrap: tự chọn width, nhưng **bắt buộc tính row height tương ứng**
+
+---
+
+### 3b. Row height — tránh chữ bị cắt khi wrap_text
+
+**openpyxl mặc định row height = 15pt, KHÔNG tự expand khi wrap_text=True.**  
+Nếu không set height thủ công → text bị cắt, chỉ thấy 1 dòng dù nội dung 3 dòng.
+
+```python
+import math
+
+def row_height_for_wrap(text, col_width, font_size=10):
+    """
+    Tính row height cần thiết khi wrap_text=True.
+    
+    col_width: độ rộng cột tính bằng character width của Excel
+    font_size: cỡ chữ (pt)
+    
+    Excel character width ≈ font_size × 0.6 px; 1 dòng text ≈ font_size × 1.2 pt height.
+    Heuristic đủ dùng:
+    """
+    if not text:
+        return font_size * 1.5
+    chars_per_line = max(1, int(col_width * 1.2))   # ~1.2 chars/unit width ở font 10
+    lines = math.ceil(len(str(text)) / chars_per_line)
+    return max(lines * (font_size * 1.5) + 4, font_size * 1.5 + 4)
+
+# Dùng trong vòng lặp data rows:
+for i, row_data in enumerate(data):
+    r = start_row + i
+    longest_text = max(row_data, key=lambda x: len(str(x)) if x else 0)
+    ws.row_dimensions[r].height = row_height_for_wrap(
+        longest_text,
+        col_width=col_width_of_text_column,   # width của cột chứa text dài nhất
+        font_size=10
+    )
+```
+
+**Trường hợp đặc biệt:**
+```python
+# Header bảng có \n (newline) trong text → đếm số dòng literal
+header_text = 'Tên hàng hóa\n(Description)'
+n_lines = header_text.count('\n') + 1   # = 2
+ws.row_dimensions[header_row].height = n_lines * 15 + 8   # 15pt/dòng + padding
+
+# Tiêu đề font lớn (size 14): height = font_size * 2 + 4 tối thiểu
+ws.row_dimensions[title_row].height = 14 * 2 + 4   # = 32
+```
+
+---
+
+### 3c. Alignment — wrap_text phải đi kèm height
+
+```python
+# wrap_text=True VÔ NGHĨA nếu không set row height → text vẫn bị cắt
 A_CC  = Alignment(horizontal='center', vertical='center', wrap_text=True)
 A_LC  = Alignment(horizontal='left',   vertical='center', wrap_text=True)
-A_RC  = Alignment(horizontal='right',  vertical='center')
+A_RC  = Alignment(horizontal='right',  vertical='center')   # số thường không wrap
+
+# Với cột số: KHÔNG dùng wrap_text — số không wrap, chỉ cần đủ col width
 ```
 
 ---
@@ -153,6 +219,9 @@ Chỉ viết lại từ đầu khi: sai logic cấu trúc lớn (ví dụ đọc
 - [ ] Mọi `sc()` call dùng keyword args
 - [ ] Mọi merge → chỉ ghi top-left cell
 - [ ] `border_range()` thay vì loop ghi thẳng vào merged cells
-- [ ] `row_dimensions[r].height` set thủ công cho mọi dòng dùng `wrap_text=True` (openpyxl không tự tính)
-- [ ] `column_dimensions[letter].width` reason theo nội dung thực tế — không copy magic numbers từ file khác
+- [ ] Cột số: width ≥ `len(str(max_value)) + số dấu phẩy + 3` — tránh `####`
+- [ ] Cột text không wrap: width = `len(text dài nhất) + 2`
+- [ ] Cột text CÓ wrap: set `row_dimensions[r].height` thủ công = `ceil(len / chars_per_line) × line_height + padding`
+- [ ] Header có `\n`: height = `n_lines × 15 + 8`
+- [ ] Cột số KHÔNG dùng `wrap_text=True`
 - [ ] `number_format` là string, không phải object (ví dụ `'#,##0'` không phải `THIN_BORDER`)
