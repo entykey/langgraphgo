@@ -224,9 +224,9 @@ func makeCoreTools(
 
 	// errorHint is appended when execute_python/execute_file fails with no exports.
 	const errorHint = "\n\n💡 Failing code auto-saved as '.last_run.py'.\n" +
-		"   → read_code('.last_run.py')                            — inspect with line numbers\n" +
-		"   → grep_code('.last_run.py', pattern)                   — locate specific issue\n" +
-		"   → patch_code('.last_run.py', old, new) + execute_file('.last_run.py') — targeted fix"
+		"   → read('.last_run.py')                            — inspect with line numbers\n" +
+		"   → grep('.last_run.py', pattern)                   — locate specific issue\n" +
+		"   → patch('.last_run.py', old, new) + execute_file('.last_run.py') — targeted fix"
 
 	// ── execute_python ────────────────────────────────────────────────────────
 	executePython := ToolDef{
@@ -287,11 +287,11 @@ func makeCoreTools(
 		},
 	}
 
-	// ── read_code ─────────────────────────────────────────────────────────────
+	// ── read ──────────────────────────────────────────────────────────────────
 	readCode := ToolDef{
-		Name:        "read_code",
-		Description: "Read a session or uploaded file with line numbers. Use start_line/end_line to read a range.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"start_line":{"type":"integer","description":"Start line 1-indexed (default 1)"},"end_line":{"type":"integer","description":"End line (default 500)"}},"required":["filename"]}`),
+		Name:        "read",
+		Description: "Read any session or uploaded text file with line numbers. Use start_line/end_line to read a specific range. For Excel files use read_excel instead.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string","description":"Filename in session or uploaded files"},"start_line":{"type":"integer","description":"First line to read, 1-indexed (default 1)"},"end_line":{"type":"integer","description":"Last line to read inclusive (default 500)"}},"required":["filename"]}`),
 		Fn: func(args map[string]any) string {
 			filename := filepath.Base(strArg(args, "filename"))
 			if filename == "" || filename == "." {
@@ -342,11 +342,11 @@ func makeCoreTools(
 		},
 	}
 
-	// ── patch_code ────────────────────────────────────────────────────────────
+	// ── patch ─────────────────────────────────────────────────────────────────
 	patchCode := ToolDef{
-		Name:        "patch_code",
-		Description: "Apply a targeted text replacement in a session file. More precise than rewriting. Auto-presents the updated file.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"old_snippet":{"type":"string","description":"Exact text to replace"},"new_snippet":{"type":"string","description":"Replacement text"}},"required":["filename","old_snippet","new_snippet"]}`),
+		Name:        "patch",
+		Description: "Apply a targeted find-and-replace in any text file (code, markdown, CSV, …). old_snippet must match exactly — use grep first to get the exact text. Shows a red/green diff preview. Does NOT emit a download card.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string","description":"Filename in session or uploaded files"},"old_snippet":{"type":"string","description":"Exact substring to replace — must exist verbatim in the file"},"new_snippet":{"type":"string","description":"Replacement text"}},"required":["filename","old_snippet","new_snippet"]}`),
 		Fn: func(args map[string]any) string {
 			filename := filepath.Base(strArg(args, "filename"))
 			oldSnippet := strArg(args, "old_snippet")
@@ -363,18 +363,27 @@ func makeCoreTools(
 				return "❌ Snippet not found in '" + filename + "'. Current content:\n" + addLineNumbers(content)
 			}
 			newContent := strings.Replace(content, oldSnippet, newSnippet, 1)
+			if newContent == content {
+				return fmt.Sprintf("⚠️ No change: old_snippet and new_snippet are identical in '%s'. Check indentation or whitespace.", filename)
+			}
 			newArt := putArtifact(sessionID, filename, []byte(newContent), art.MimeType)
-			emitFilePresent(eventCh, newArt)
+			// Emit diff preview for the chip (no file_present card — scripts stay internal)
+			emit(eventCh, "patch_diff", map[string]any{
+				"filename":    filename,
+				"old_snippet": oldSnippet,
+				"new_snippet": newSnippet,
+				"version":     newArt.Version,
+			})
 			n := strings.Count(newContent, "\n") + 1
-			return fmt.Sprintf("✅ Patched '%s' (v%d, %d lines). Run execute_file('%s') to retry.", filename, newArt.Version, n, filename)
+			return fmt.Sprintf("✅ Patched '%s' → v%d (%d lines). Run execute_file('%s') to retry.", filename, newArt.Version, n, filename)
 		},
 	}
 
-	// ── grep_code ─────────────────────────────────────────────────────────────
+	// ── grep ──────────────────────────────────────────────────────────────────
 	grepCode := ToolDef{
-		Name:        "grep_code",
-		Description: "Search for a regex pattern in a session file. Returns matching lines with line numbers.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"pattern":{"type":"string","description":"Regex pattern or literal string to search for"}},"required":["filename","pattern"]}`),
+		Name:        "grep",
+		Description: "Search for a literal string or regex in any text file (code, markdown, CSV, …). Returns matching lines with line numbers. Always grep before patch to confirm the exact old_snippet exists.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string","description":"Filename in session or uploaded files"},"pattern":{"type":"string","description":"Literal string or regex pattern to search for"}},"required":["filename","pattern"]}`),
 		Fn: func(args map[string]any) string {
 			filename := filepath.Base(strArg(args, "filename"))
 			pattern := strArg(args, "pattern")

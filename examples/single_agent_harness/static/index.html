@@ -212,6 +212,11 @@
     line-height: 1.5; flex: 1;
   }
 
+  /* patch git-diff lines */
+  .diff-line { font-family: var(--mono); font-size: 10.5px; padding: 0 4px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+  .diff-del  { background: rgba(220,38,38,.12); color: #b91c1c; }
+  .diff-add  { background: rgba(21,128,61,.12); color: #15803d; }
+
   /* Artifact file card */
   .artifact-card {
     margin: 6px 0;
@@ -757,9 +762,9 @@ function toolLabel(name, extra) {
   if (name === "write_code" ||
       name === "write_file")         return lbl('write', b);
   if (name === "write_binary_file")  return lbl('blob', b);
-  if (name === "read_code")          return lbl('read', b);
-  if (name === "patch_code")         return lbl('patch', b);
-  if (name === "grep_code")          return lbl('grep', b);
+  if (name === "read")               return lbl('read', b);
+  if (name === "patch")              return lbl('patch', b);
+  if (name === "grep")               return lbl('grep', b);
   if (name === "read_excel")         return lbl('xlsx', b);
   if (name === "edit_xlsx")          return lbl('edit', b);
   if (name === "zip_files")          return lbl('zip', b);
@@ -1505,6 +1510,7 @@ async function sendMessage(message) {
   let curBubble         = null;
   let curAgent          = "root_agent";
   let curCitations      = 0;
+  let pendingPatchDiff  = null; // { old_snippet, new_snippet } set by patch_diff, consumed by tool_result
   let supervisorStartTime  = Date.now();
   let turnFirstOutputMs    = null;
   let curTtft              = null;
@@ -1517,7 +1523,7 @@ async function sendMessage(message) {
     const texts = [...curBubble.querySelectorAll(".content-text")]
       .map(b => b._raw || b.textContent).filter(Boolean).join("\n\n");
     turns.push({ agent: curAgent, content: texts });
-    curBubble = null; curCitations = 0; curReasoning = ''; toolsCollapsed = false;
+    curBubble = null; curCitations = 0; curReasoning = ''; toolsCollapsed = false; pendingPatchDiff = null;
   }
 
   function markFirstOutput() {
@@ -1593,16 +1599,18 @@ async function sendMessage(message) {
                 if (toolName === 'web_search') {
                   liveLabel.innerHTML = lbl('search', `"${preview}"`);
                 } else if (toolName === 'execute_python') {
-                  liveLabel.innerHTML = lbl('exec', preview);
+                  // Prefer the file being produced (/tmp/) or consumed (/uploaded/) over the first code line
+                  const execFileM = partial.match(/\/(?:tmp|uploaded)\/([^\s"\\\/]+\.[a-z0-9]{1,5})/i);
+                  liveLabel.innerHTML = execFileM ? lbl('exec', execFileM[1]) : lbl('exec', preview);
                 } else if (toolName === 'execute_file') {
                   liveLabel.innerHTML = lbl('run', basename);
                 } else if (toolName === 'write_code' || toolName === 'write_file') {
                   liveLabel.innerHTML = lbl('write', basename);
                 } else if (toolName === 'write_binary_file') {
                   liveLabel.innerHTML = lbl('blob', basename);
-                } else if (toolName === 'patch_code') {
+                } else if (toolName === 'patch') {
                   liveLabel.innerHTML = lbl('patch', basename);
-                } else if (toolName === 'read_code') {
+                } else if (toolName === 'read') {
                   const startM = partial.match(/"start_line"\s*:\s*(\d+)/);
                   const endM   = partial.match(/"end_line"\s*:\s*(\d+)/);
                   if (startM || endM) {
@@ -1612,7 +1620,7 @@ async function sendMessage(message) {
                   } else {
                     liveLabel.innerHTML = lbl('read', basename);
                   }
-                } else if (toolName === 'grep_code') {
+                } else if (toolName === 'grep') {
                   const pm = partial.match(/"pattern"\s*:\s*"((?:[^"\\]|\\.)*?)(?:"|$)/);
                   if (pm && pm[1]) {
                     const pat = pm[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\').slice(0, 32);
@@ -1762,8 +1770,10 @@ async function sendMessage(message) {
                   || resultText.includes("Traceback (most recent call last)");
                 const hadDockerOutput = !!item.dataset.hadOutput;
                 const hadCodePreview  = !!item.dataset.codePreview;
+                const hadDiff         = !!item.dataset.hasDiff;
                 delete item.dataset.hadOutput;
                 delete item.dataset.codePreview;
+                delete item.dataset.hasDiff;
                 // Restore label that was changed to "▶ Running..."
                 if (item.dataset.savedLabel) {
                   const labelEl = item.querySelector('.tool-label');
@@ -1773,22 +1783,60 @@ async function sendMessage(message) {
                 item.classList.remove("loading", "streaming");
                 item.classList.add(isError ? "error" : "has-result");
                 const result = item.querySelector(".tool-result");
+                // Fallback: apply pending diff if patch_diff event didn't find the chip in time
+                const applyDiff = !hadDiff && data.name === 'patch' && pendingPatchDiff;
+                if (applyDiff) {
+                  const oldLines = pendingPatchDiff.old_snippet.split('\n');
+                  const newLines = pendingPatchDiff.new_snippet.split('\n');
+                  let diffHtml = '';
+                  for (const line of oldLines) diffHtml += `<div class="diff-line diff-del">- ${h(line)}</div>`;
+                  for (const line of newLines) diffHtml += `<div class="diff-line diff-add">+ ${h(line)}</div>`;
+                  if (result) result.innerHTML = diffHtml;
+                  pendingPatchDiff = null;
+                }
                 if (isError) {
-                  // Errors always replace (show full traceback even if code was previewed)
+                  // Errors always replace (show full traceback even if diff was shown)
                   if (result) result.textContent = resultText;
-                } else if (!hadDockerOutput && !hadCodePreview) {
+                } else if (!hadDockerOutput && !hadCodePreview && !hadDiff && !applyDiff) {
                   // Nothing shown yet — fill with result
                   if (result) result.textContent = resultText;
                 }
-                // else: body already has code preview + "─── Output ───" + streamed lines; keep it
+                // else: body already has code/diff preview or streamed output; keep it
                 if (isError) {
                   item.classList.add("expanded");
+                } else if (hadDiff || applyDiff) {
+                  item.classList.add("expanded");   // keep diff visible after completion
                 } else {
                   item.classList.remove("expanded");
                 }
               }
             }
             ctxBar.addToolChars((data.result || '').length);
+            break;
+          }
+
+          case "patch_diff": {
+            // Always store diff — tool_result handler will consume it as a fallback.
+            pendingPatchDiff = { old_snippet: data.old_snippet || '', new_snippet: data.new_snippet || '' };
+            // Also try to apply immediately to the loading chip (may succeed if chip already exists).
+            if (curBubble) {
+              const pdItem = findToolItem(curBubble, 'patch', null, '.loading')
+                          || findToolItem(curBubble, 'patch', null, null);
+              if (pdItem) {
+                const pdResult = pdItem.querySelector('.tool-result');
+                if (pdResult) {
+                  const oldLines = pendingPatchDiff.old_snippet.split('\n');
+                  const newLines = pendingPatchDiff.new_snippet.split('\n');
+                  let diffHtml = '';
+                  for (const line of oldLines) diffHtml += `<div class="diff-line diff-del">- ${h(line)}</div>`;
+                  for (const line of newLines) diffHtml += `<div class="diff-line diff-add">+ ${h(line)}</div>`;
+                  pdResult.innerHTML = diffHtml;
+                  pdItem.dataset.hasDiff = '1';
+                  pdItem.classList.add('expanded');
+                  pendingPatchDiff = null; // consumed — no need for fallback
+                }
+              }
+            }
             break;
           }
 
