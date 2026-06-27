@@ -14,9 +14,9 @@ Output file       →  lưu vào /tmp/<filename>        (auto-export, auto-prese
 **Workflow chuẩn cho uploaded file:**
 ```python
 # KHÔNG cần edit_xlsx cho user-uploaded file — nó đã có sẵn ở /uploaded/
-wb = openpyxl.load_workbook('/uploaded/HoaDon_GTGT_7SP.xlsx')
+wb = openpyxl.load_workbook('/uploaded/<tên_file_user_upload>')
 # ... chỉnh sửa ...
-wb_new.save('/tmp/HoaDon_Formatted.xlsx')   # auto-present, KHÔNG gọi present_artifact
+wb_new.save('/tmp/<tên_file_output>')   # auto-present, KHÔNG gọi present_artifact
 ```
 
 **Workflow chuẩn cho session artifact (file agent đã tạo trước đó):**
@@ -101,21 +101,29 @@ def border_range(ws, r1, c1, r2, c2, bdr):
 
 ## 3. LAYOUT — tránh ô bị tràn chữ
 
+**Nguyên tắc: không copy-paste magic numbers — reason về nội dung thực tế.**
+
 ```python
-# ── Độ rộng cột (ví dụ invoice 9 cột) ──────────────────────────────────
-col_widths = {1: 5, 2: 45, 3: 9, 4: 9, 5: 16, 6: 18, 7: 10, 8: 16, 9: 18}
-for col, w in col_widths.items():
-    ws.column_dimensions[get_column_letter(col)].width = w
+# ── Độ rộng cột ──────────────────────────────────────────────────────────
+# Quyết định dựa trên nội dung sẽ điền vào từng cột:
+#   - Cột số thứ tự / mã ngắn: 4–6
+#   - Cột label / tên ngắn (10–15 ký tự): 12–18
+#   - Cột mô tả dài (tên hàng, địa chỉ): ước tính độ dài text / 2, tối thiểu 30
+#   - Cột số tiền (định dạng #,##0): 14–18 (đủ chứa 12 chữ số + dấu phân cách)
+for col_idx, width in col_widths.items():   # col_widths do bạn tự định nghĩa theo nội dung
+    ws.column_dimensions[get_column_letter(col_idx)].width = width
 
-# ── Chiều cao dòng (bắt buộc set nếu có wrap_text) ──────────────────────
-ws.row_dimensions[1].height = 22   # dòng thường
-ws.row_dimensions[2].height = 35   # dòng tiêu đề lớn
-ws.row_dimensions[header_row].height = 42  # header bảng (multi-line)
-# Dòng data: min 22; nếu tên hàng dài đặt 28–32
-for r in data_rows:
-    ws.row_dimensions[r].height = 28
+# ── Chiều cao dòng ────────────────────────────────────────────────────────
+# BẮT BUỘC set thủ công khi dùng wrap_text=True, vì openpyxl không tự tính.
+# Ước tính: (số ký tự nội dung / độ rộng cột) × 15 + 5, tối thiểu 20.
+# Ví dụ:
+#   - Dòng tiêu đề đơn: ~20–24
+#   - Dòng tiêu đề lớn (font size 14–16): ~30–38
+#   - Dòng header bảng có 2 dòng text: ~36–44
+#   - Dòng data tên hàng dài (wrap): 24–32 tùy độ dài text và col width
+ws.row_dimensions[r].height = <giá_trị_tính_theo_nội_dung>
 
-# ── Alignment cho merged cell header ────────────────────────────────────
+# ── Alignment ────────────────────────────────────────────────────────────
 A_CC  = Alignment(horizontal='center', vertical='center', wrap_text=True)
 A_LC  = Alignment(horizontal='left',   vertical='center', wrap_text=True)
 A_RC  = Alignment(horizontal='right',  vertical='center')
@@ -145,6 +153,6 @@ Chỉ viết lại từ đầu khi: sai logic cấu trúc lớn (ví dụ đọc
 - [ ] Mọi `sc()` call dùng keyword args
 - [ ] Mọi merge → chỉ ghi top-left cell
 - [ ] `border_range()` thay vì loop ghi thẳng vào merged cells
-- [ ] `row_dimensions[r].height` set cho mọi dòng có nội dung
-- [ ] `column_dimensions[letter].width` set đủ rộng (cột label ≥ 10, cột nội dung ≥ 30)
+- [ ] `row_dimensions[r].height` set thủ công cho mọi dòng dùng `wrap_text=True` (openpyxl không tự tính)
+- [ ] `column_dimensions[letter].width` reason theo nội dung thực tế — không copy magic numbers từ file khác
 - [ ] `number_format` là string, không phải object (ví dụ `'#,##0'` không phải `THIN_BORDER`)
