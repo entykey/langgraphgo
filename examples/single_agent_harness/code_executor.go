@@ -116,6 +116,9 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 	dockerArgs = append(dockerArgs, codeExecImage)
 	dockerArgs = append(dockerArgs, interpArgs...)
 
+	// Log the full command so failures are immediately diagnosable without source-reading.
+	fmt.Printf("[code_exec] spawn: docker %s\n", strings.Join(dockerArgs, " "))
+
 	runCtx, cancel := context.WithTimeout(ctx, codeExecTimeout)
 	defer cancel()
 
@@ -159,8 +162,11 @@ func executeCode(ctx context.Context, language, code, sessionID string, eventCh 
 		hasError = true
 		if runCtx.Err() == context.DeadlineExceeded {
 			outputLines = append(outputLines, fmt.Sprintf("\n⏱ Timeout: execution exceeded %s and was killed.", codeExecTimeout))
+		} else {
+			// Log the exit error so the host-side log has the actual exit code,
+			// even when the container sends no stderr (e.g. killed by OOM, bad mount).
+			fmt.Printf("[code_exec] container exited with error: %v\n", waitErr)
 		}
-		// Non-zero exit — fall through, include stderr below.
 	}
 
 	// Attach stderr if non-empty.

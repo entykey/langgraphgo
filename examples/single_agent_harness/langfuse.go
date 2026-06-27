@@ -55,6 +55,10 @@ type lfBatch struct {
 
 var globalLF *LFClient
 
+// langfuseLog controls whether batch-success lines are printed to stdout.
+// Set LANGFUSE_LOG=false to suppress per-request noise in production; errors always print.
+var langfuseLog = true
+
 func initLangfuse() {
 	host := os.Getenv("LANGFUSE_HOST")
 	pk := os.Getenv("LANGFUSE_PUBLIC_KEY")
@@ -64,6 +68,9 @@ func initLangfuse() {
 		globalLF = &LFClient{disabled: true}
 		return
 	}
+	if v := os.Getenv("LANGFUSE_LOG"); v == "false" || v == "0" {
+		langfuseLog = false
+	}
 	auth := base64.StdEncoding.EncodeToString([]byte(pk + ":" + sk))
 	globalLF = &LFClient{
 		host:       host,
@@ -72,7 +79,7 @@ func initLangfuse() {
 	}
 	globalLF.wg.Add(1)
 	go globalLF.run()
-	fmt.Printf("[langfuse] enabled → %s\n", host)
+	fmt.Printf("[langfuse] enabled → %s (log=%v)\n", host, langfuseLog)
 
 	// Seed model pricing in background — Langfuse may still be booting on fresh stack.
 	go globalLF.seedLangfuseModelsWithRetry()
@@ -151,8 +158,13 @@ func (c *LFClient) sendBatch(batch []lfBatch) {
 		return
 	}
 	resp.Body.Close()
-	fmt.Printf("[langfuse] batch %d [%s] → %d (%.1fKB, %dms)\n",
-		len(batch), strings.Join(types, ","), resp.StatusCode, kb, elapsed.Milliseconds())
+	if langfuseLog {
+		fmt.Printf("[langfuse] batch %d [%s] → %d (%.1fKB, %dms)\n",
+			len(batch), strings.Join(types, ","), resp.StatusCode, kb, elapsed.Milliseconds())
+	} else if resp.StatusCode >= 400 {
+		fmt.Printf("[langfuse] batch error %d [%s] → %d (%.1fKB, %dms)\n",
+			len(batch), strings.Join(types, ","), resp.StatusCode, kb, elapsed.Milliseconds())
+	}
 }
 
 // sanitizeAny recursively replaces strings longer than 500 chars with a placeholder.
@@ -262,7 +274,9 @@ func (c *LFClient) seedLangfuseModels() {
 	for _, model := range langfuseModels {
 		name, _ := model["modelName"].(string)
 		if existing[name] {
-			fmt.Printf("[langfuse] model %q already exists — skipping\n", name)
+			if langfuseLog {
+				fmt.Printf("[langfuse] model %q already exists — skipping\n", name)
+			}
 			continue
 		}
 		b, _ := json.Marshal(model)
