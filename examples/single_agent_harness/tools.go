@@ -193,12 +193,33 @@ func makeCoreTools(
 		Fn:          writeFileFn,
 	}
 
-	// ── write_code — alias for write_file ─────────────────────────────────────
+	// ── write_code — saves script silently (no file_present card) ───────────
+	writeCodeFn := func(args map[string]any) string {
+		filename := filepath.Base(strArg(args, "filename"))
+		content := strArg(args, "content")
+		if filename == "" || filename == "." {
+			return "Error: filename required"
+		}
+		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+		if binaryExts[ext] {
+			return fmt.Sprintf(
+				"Error: '%s' is binary — do NOT use write_code for it. "+
+					"Binary files are created by execute_python (save to /tmp, auto-exported). "+
+					"Use present_artifact('%s') to re-present an existing file.",
+				filename, filename)
+		}
+		mime := guessMime(filename)
+		art := putArtifact(sessionID, filename, []byte(content), mime)
+		// Intentionally NOT calling emitFilePresent — scripts are internal artifacts;
+		// the chip already shows the code preview during streaming.
+		n := strings.Count(content, "\n") + 1
+		return fmt.Sprintf("✅ Wrote '%s' (v%d, %d lines).", filename, art.Version, n)
+	}
 	writeCode := ToolDef{
 		Name:        "write_code",
-		Description: "Save or update a script in the session. Alias for write_file — auto-presents.",
+		Description: "Save or update a script (Python, shell, …) in the session. Does NOT present as download card — use execute_file to run it.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"content":{"type":"string"}},"required":["filename","content"]}`),
-		Fn:          writeFileFn,
+		Fn:          writeCodeFn,
 	}
 
 	// errorHint is appended when execute_python/execute_file fails with no exports.

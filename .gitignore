@@ -25,3 +25,9 @@ examples/comic_skill_example/comic/
 
 # mas_agent_handoff Python venv
 examples/mas_agent_handoff/agent_venv/
+
+# single_agent_harness — sandbox bind-mount volume (user uploads + exported files)
+examples/single_agent_harness/tmp/
+
+# compiled binaries (go build artifacts)
+examples/single_agent_harness.exe

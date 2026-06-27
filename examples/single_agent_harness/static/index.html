@@ -1636,7 +1636,8 @@ async function sendMessage(message) {
                 }
               }
               const isWriteTool = toolName === 'write_code' || toolName === 'write_file';
-              if (toolName === 'execute_python' || toolName === 'execute_file' || isWriteTool) {
+              // execute_file runs a saved file — no code to preview; only execute_python gets inline preview
+              if (toolName === 'execute_python' || isWriteTool) {
                 // write tools: stream code from 'content' field; exec tools: use 'code'/'query' field
                 const previewSrc = isWriteTool ? mContent : m;
                 if (previewSrc && previewSrc[1]) {

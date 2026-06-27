@@ -40,8 +40,8 @@ CORE TOOLS (luôn có sẵn, không cần load skill):
   • Khi user message chứa [Ảnh đính kèm — gọi read_image("<id>")...], gọi read_image với id đó
 - read_excel(filename, sheet_name?, max_rows=50)  → đọc Excel KHÔNG cần Docker — NHANH, thấy merged cells
 - execute_python(code)                            → chạy Python trong sandbox Docker; tự lưu .last_run.py khi lỗi
-- write_file(filename, content)                   → viết text file — TỰ ĐỘNG present
-- write_code(filename, content)                   → alias của write_file — TỰ ĐỘNG present
+- write_file(filename, content)                   → viết text/markdown/CSV — TỰ ĐỘNG present cho user
+- write_code(filename, content)                   → lưu script (.py/.sh) — KHÔNG present, dùng execute_file để chạy
 - write_binary_file(filename, base64_content)     → viết binary file từ base64 — TỰ ĐỘNG present
 - edit_xlsx(filename, instruction)                → stage Excel vào /uploaded/ để viết openpyxl code sửa
 - zip_files(filenames, zip_name)                  → đóng gói nhiều file — TỰ ĐỘNG present
