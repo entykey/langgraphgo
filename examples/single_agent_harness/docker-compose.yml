@@ -188,27 +188,27 @@ services:
   # When developing: keep this commented, run `go run .` in the host instead.
   # When testing the full containerised stack: uncomment + docker compose up -d --build
   #
-  # sah-go-agent-core:
-  #   container_name: sah-go-agent-core
-  #   build:
-  #     context: ../..                              # langgraphgo/ repo root
-  #     dockerfile: examples/single_agent_harness/Dockerfile
-  #   env_file: .env                               # API keys (DEEPSEEK_API_KEY, GOOGLE_API_KEY, …)
-  #   environment:
-  #     LANGFUSE_HOST: http://sah-langfuse-web:3000   # internal Docker network — NOT localhost:3100
-  #     UPLOAD_DIR: /app/tmp/uploads
-  #   ports:
-  #     - "8080:8080"
-  #   depends_on:
-  #     sah-langfuse-web:
-  #       condition: service_started
-  #   volumes:
-  #     - sah_uploads:/app/tmp/uploads
-  #   restart: unless-stopped
+  sah-go-agent-core:
+    container_name: sah-go-agent-core
+    build:
+      context: ../..                              # langgraphgo/ repo root
+      dockerfile: examples/single_agent_harness/Dockerfile
+    env_file: .env                               # API keys (DEEPSEEK_API_KEY, GOOGLE_API_KEY, …)
+    environment:
+      LANGFUSE_HOST: http://sah-langfuse-web:3000   # internal Docker network — NOT localhost:3100
+      UPLOAD_DIR: /app/tmp/uploads
+    ports:
+      - "8080:8080"
+    depends_on:
+      sah-langfuse-web:
+        condition: service_started
+    volumes:
+      - sah_uploads:/app/tmp/uploads
+    restart: unless-stopped
 
 volumes:
   sah_postgres:
   sah_clickhouse:
   sah_redis:
   sah_minio:
-  # sah_uploads:   # uncomment together with sah-go-agent-core above
+  sah_uploads:
