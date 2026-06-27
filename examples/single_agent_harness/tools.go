@@ -553,7 +553,8 @@ func makeCoreTools(
 	// ── edit_xlsx ─────────────────────────────────────────────────────────────
 	editXlsx := ToolDef{
 		Name: "edit_xlsx",
-		Description: "Stage an Excel file from the session into /uploaded/<filename> in the Docker sandbox so you can write openpyxl code to read, edit, and save to /tmp/<filename>. " +
+		Description: "Confirm an Excel file is accessible in the Docker sandbox at /uploaded/<filename>, " +
+			"then describe the edit to perform. Works for both user-uploaded files AND session artifacts. " +
 			"Call execute_python() with the openpyxl code immediately after.",
 		Parameters: json.RawMessage(`{"type":"object","properties":{"filename":{"type":"string"},"instruction":{"type":"string"}},"required":["filename","instruction"]}`),
 		Fn: func(args map[string]any) string {
@@ -563,31 +564,50 @@ func makeCoreTools(
 				return "Error: filename required."
 			}
 			fname := filepath.Base(filename)
-			art := getArtifact(sessionID, fname)
-			if art == nil {
-				var names []string
-				for _, a := range listArtifacts(sessionID) {
-					names = append(names, a.Filename)
+
+			// Case 1: session artifact (agent-created file).
+			if art := getArtifact(sessionID, fname); art != nil {
+				udir := sessionUploadDir(sessionID)
+				if err := os.MkdirAll(udir, 0o755); err != nil {
+					return "Error creating upload dir: " + err.Error()
 				}
-				return fmt.Sprintf("File '%s' không tìm thấy trong session. Có sẵn: %v", fname, names)
+				dest := filepath.Join(udir, fname)
+				if err := os.WriteFile(dest, art.Content, 0o644); err != nil {
+					return "Error staging file: " + err.Error()
+				}
+				return fmt.Sprintf(
+					"File '%s' (v%d, %dB) đã stage vào /uploaded/%s trong Docker.\n"+
+						"Hướng dẫn: %s\n"+
+						"Bước tiếp: execute_python() đọc từ '/uploaded/%s', lưu vào '/tmp/%s'.",
+					fname, art.Version, len(art.Content), fname, instruction, fname, fname,
+				)
 			}
-			// Write into the session upload dir so Docker can mount it.
-			udir := sessionUploadDir(sessionID)
-			if err := os.MkdirAll(udir, 0o755); err != nil {
-				return "Error creating upload dir: " + err.Error()
+
+			// Case 2: user-uploaded file (already on disk, already mounted as /uploaded/).
+			upath := filepath.Join(sessionUploadDir(sessionID), fname)
+			if info, err := os.Stat(upath); err == nil {
+				return fmt.Sprintf(
+					"File '%s' (%dB) là file user upload — đã có sẵn tại /uploaded/%s trong Docker (không cần stage).\n"+
+						"Hướng dẫn: %s\n"+
+						"Bước tiếp: execute_python() đọc từ '/uploaded/%s', lưu output vào '/tmp/%s'.",
+					fname, info.Size(), fname, instruction, fname, fname,
+				)
 			}
-			dest := filepath.Join(udir, fname)
-			if err := os.WriteFile(dest, art.Content, 0o644); err != nil {
-				return "Error staging file: " + err.Error()
+
+			// Not found anywhere.
+			var sessionNames []string
+			for _, a := range listArtifacts(sessionID) {
+				sessionNames = append(sessionNames, a.Filename)
+			}
+			var uploadedNames []string
+			if entries, _ := os.ReadDir(sessionUploadDir(sessionID)); entries != nil {
+				for _, e := range entries {
+					uploadedNames = append(uploadedNames, e.Name())
+				}
 			}
 			return fmt.Sprintf(
-				"File '%s' (v%d, %dB) đã sẵn sàng tại /uploaded/%s trong Docker.\n"+
-					"Hướng dẫn sửa: %s\n"+
-					"Bước tiếp: gọi execute_python() với code openpyxl đọc từ '/uploaded/%s', "+
-					"áp dụng thay đổi, lưu kết quả vào '/tmp/%s'. File output sẽ tự động present.",
-				fname, art.Version, len(art.Content), fname,
-				instruction,
-				fname, fname,
+				"File '%s' không tìm thấy.\nSession artifacts: %v\nUploaded files: %v",
+				fname, sessionNames, uploadedNames,
 			)
 		},
 	}
