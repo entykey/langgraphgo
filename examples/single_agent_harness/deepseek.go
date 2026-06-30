@@ -172,7 +172,7 @@ func (c *DSClient) StreamChatWithTools(
 		Tools:         tools,
 		ToolChoice:    toolChoice,
 		Thinking:      noThinkDS(),
-		Temperature:   0.3,
+		Temperature:   0.6,
 		Stream:        true,
 		StreamOptions: &dsStreamOptions{IncludeUsage: true},
 	})
