@@ -741,11 +741,17 @@ func makeCoreTools(
 			"(1) User has been persistently abusive AFTER a clear prior warning was issued in a previous turn, " +
 			"(2) User explicitly requests ending AND has confirmed they understand this is permanent. " +
 			"NEVER use if user shows any sign of self-harm, crisis, or intent to harm others — " +
-			"regardless of how abusive they are being.",
-		Parameters: json.RawMessage(`{"type":"object","properties":{}}`),
+			"regardless of how abusive they are being. " +
+			"Always supply a brief reason (≤200 chars) describing why the conversation is being ended.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"reason":{"type":"string","description":"Brief reason for ending the conversation (max 200 chars), shown to the user."}},"required":["reason"]}`),
 		Fn: func(args map[string]any) string {
-			emit(eventCh, "conversation_ended", map[string]any{"session_id": sessionID})
-			fmt.Printf("[agent] end_conversation called for session=%s\n", sessionID[:8])
+			reason := strArg(args, "reason")
+			setEndReason(sessionID, reason)
+			emit(eventCh, "conversation_ended", map[string]any{
+				"session_id": sessionID,
+				"reason":     reason,
+			})
+			fmt.Printf("[agent] end_conversation session=%s reason=%q\n", sessionID[:8], reason)
 			return "Conversation permanently ended."
 		},
 	}

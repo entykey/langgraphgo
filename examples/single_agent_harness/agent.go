@@ -165,7 +165,24 @@ var (
 
 	stopReasonsMu sync.Mutex
 	stopReasons   = map[string]string{}
+
+	endReasonsMu sync.Mutex
+	endReasons   = map[string]string{} // sessionID → end reason set by end_conversation tool
 )
+
+func setEndReason(sessionID, reason string) {
+	endReasonsMu.Lock()
+	endReasons[sessionID] = reason
+	endReasonsMu.Unlock()
+}
+
+func consumeEndReason(sessionID string) string {
+	endReasonsMu.Lock()
+	defer endReasonsMu.Unlock()
+	r := endReasons[sessionID]
+	delete(endReasons, sessionID)
+	return r
+}
 
 func getSessionSkills(sessionID string) map[string]bool {
 	sessionSkillsMu.Lock()

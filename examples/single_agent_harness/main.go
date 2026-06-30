@@ -254,8 +254,13 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 			stopReason = "llm_error"
 		}
 
+		endReason := ""
+		if endedByTool {
+			endReason = consumeEndReason(sessionID)
+		}
+
 		fmt.Printf("[agent] session=%s stop=%s answer_len=%d\n", sessionID[:8], stopReason, len(answer))
-		if err := upsertAssistantTurn(sessionID, answer, finalDSMsgs, stopReason); err != nil {
+		if err := upsertAssistantTurn(sessionID, answer, finalDSMsgs, stopReason, endReason); err != nil {
 			fmt.Fprintf(os.Stderr, "[mongo] upsert assistant turn: %v\n", err)
 		}
 		globalLF.TraceUpdate(traceID, answer)
@@ -710,6 +715,7 @@ func sessionDetailHandler(w http.ResponseWriter, r *http.Request) {
 			"name":             doc.Name,
 			"status":           doc.Status,
 			"last_stop_reason": doc.LastStopReason,
+			"end_reason":       doc.EndReason,
 			"interrupted":      doc.Interrupted,
 			"updated_at":       doc.UpdatedAt,
 			"ui_messages":      doc.UIMessages,

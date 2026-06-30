@@ -485,19 +485,30 @@
   .compact-btn:hover:not(:disabled) { background: var(--border); color: var(--text); }
   .compact-btn:disabled { opacity: .4; cursor: not-allowed; }
 
-  /* Ended-conversation banner */
-  .ended-banner {
-    margin: 0 20px 10px;
-    padding: 9px 16px;
-    background: rgba(239,68,68,.07);
-    border: 1px solid rgba(239,68,68,.22);
-    border-radius: 8px;
-    color: #ef4444;
-    font-size: 12.5px;
-    text-align: center;
-    pointer-events: none;
+  /* Ended-conversation — inline card in chat */
+  .ended-card {
+    display: flex; align-items: flex-start; gap: 10px;
+    margin: 8px 20px 4px;
+    padding: 12px 16px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; color: var(--muted); font-size: 13px;
   }
-  .input-area.session-ended { opacity: .35; pointer-events: none; }
+  .ended-card-icon { font-size: 15px; flex-shrink: 0; margin-top: 1px; opacity: .7; }
+  .ended-card-title { font-weight: 500; color: var(--text); margin-bottom: 3px; font-size: 13px; }
+  .ended-card-reason { color: var(--muted); font-size: 12px; line-height: 1.55; }
+
+  /* Ended-conversation — bottom footer replacing input form */
+  .ended-footer {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 20px 18px; flex-shrink: 0;
+  }
+  .ended-footer-label { font-size: 12.5px; color: var(--muted); }
+  .ended-footer-new-btn {
+    background: var(--accent); color: #fff; border: none; border-radius: var(--radius);
+    padding: 9px 18px; font-size: 13.5px; font-weight: 500; cursor: pointer;
+    transition: opacity .15s;
+  }
+  .ended-footer-new-btn:hover { opacity: .88; }
 
   /* System message (compact result, info notices) */
   .sys-msg {
@@ -1276,25 +1287,34 @@ function setInputDisabled(v) {
   $stopBtn.style.display = v ? 'inline-flex' : 'none';
 }
 
-function conversationEnded() {
-  $input.disabled = true;
-  $btn.disabled = true;
-  $stopBtn.style.display = 'none';
+function conversationEnded(reason) {
+  // Inline card in chat
+  if (!document.getElementById('ended-card')) {
+    const card = document.createElement('div');
+    card.id = 'ended-card';
+    card.className = 'ended-card';
+    card.innerHTML = `<div class="ended-card-icon">ⓘ</div><div><div class="ended-card-title">Agent đã kết thúc cuộc hội thoại này</div>${reason ? `<div class="ended-card-reason">${escHtml(reason)}</div>` : ''}</div>`;
+    $msgs.appendChild(card);
+    scrollBottom();
+  }
+  // Hide form, show footer with New Chat button
   const form = document.getElementById('form');
-  form.classList.add('session-ended');
-  if (!document.getElementById('ended-banner')) {
-    const banner = document.createElement('div');
-    banner.id = 'ended-banner';
-    banner.className = 'ended-banner';
-    banner.textContent = '🔒 Cuộc hội thoại này đã kết thúc vĩnh viễn.';
-    form.parentNode.insertBefore(banner, form);
+  form.style.display = 'none';
+  if (!document.getElementById('ended-footer')) {
+    const footer = document.createElement('div');
+    footer.id = 'ended-footer';
+    footer.className = 'ended-footer';
+    footer.innerHTML = `<span class="ended-footer-label">🔒 Cuộc hội thoại đã kết thúc vĩnh viễn</span><button class="ended-footer-new-btn" onclick="startNewChat()">✏️ New Chat</button>`;
+    form.parentNode.insertBefore(footer, form);
   }
 }
 
 function clearEndedState() {
-  const banner = document.getElementById('ended-banner');
-  if (banner) banner.remove();
-  document.getElementById('form').classList.remove('session-ended');
+  const card = document.getElementById('ended-card');
+  if (card) card.remove();
+  const footer = document.getElementById('ended-footer');
+  if (footer) footer.remove();
+  document.getElementById('form').style.display = '';
 }
 
 // ── Compact ────────────────────────────────────────────────────────────────────
@@ -1717,7 +1737,7 @@ async function openSession(sid) {
     }
 
     if (doc.status === 'ended') {
-      conversationEnded();
+      conversationEnded(doc.end_reason || '');
     } else if (doc.status === 'generating') {
       const b = createAiBubble('⏳ Đang sinh...');
       $aiLogo.classList.add('generating');
@@ -2227,9 +2247,9 @@ async function sendMessage(message) {
             break; // keep-alive, no UI action needed
 
           case "conversation_ended":
-            commitCurrent();
-            hideFlow();
-            conversationEnded();
+            // Don't commitCurrent here — tool_result for this call arrives next
+            // and needs curBubble intact to transition the chip out of loading state.
+            conversationEnded(data.reason || '');
             break;
 
           case "done":

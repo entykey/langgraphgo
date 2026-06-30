@@ -21,6 +21,7 @@ type ConversationDoc struct {
 	Name           string      `bson:"name"`
 	Status         string      `bson:"status"`
 	LastStopReason string      `bson:"last_stop_reason"`
+	EndReason      string      `bson:"end_reason"      json:"end_reason"`
 	LastRequestID  string      `bson:"last_request_id"`
 	Interrupted    bool        `bson:"interrupted"`
 	UIMessages     []MsgUI     `bson:"ui_messages"`
@@ -216,8 +217,8 @@ func upsertUserTurn(sessionID, name, reqID, userMsg string, dsMessages []dsChatM
 	return nil
 }
 
-// upsertAssistantTurn saves assistant response + final ds_messages, marks session as idle.
-func upsertAssistantTurn(sessionID, finalText string, finalDSMsgs []dsChatMsg, stopReason string) error {
+// upsertAssistantTurn saves assistant response + final ds_messages, marks session idle/ended.
+func upsertAssistantTurn(sessionID, finalText string, finalDSMsgs []dsChatMsg, stopReason, endReason string) error {
 	if !mongoOn {
 		fmt.Printf("[mongo:upsertAssist] mongoOn=false, skip\n")
 		return nil
@@ -231,14 +232,16 @@ func upsertAssistantTurn(sessionID, finalText string, finalDSMsgs []dsChatMsg, s
 	if stopReason == "conversation_ended" {
 		status = "ended"
 	}
-	update := bson.M{
-		"$set": bson.M{
-			"status":           status,
-			"last_stop_reason": stopReason,
-			"ds_messages":      finalDSMsgs,
-			"updated_at":       time.Now(),
-		},
+	setFields := bson.M{
+		"status":           status,
+		"last_stop_reason": stopReason,
+		"ds_messages":      finalDSMsgs,
+		"updated_at":       time.Now(),
 	}
+	if endReason != "" {
+		setFields["end_reason"] = endReason
+	}
+	update := bson.M{"$set": setFields}
 	if finalText != "" {
 		update["$push"] = bson.M{"ui_messages": MsgUI{Role: "model", Content: finalText}}
 	}
