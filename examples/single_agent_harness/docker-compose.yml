@@ -198,6 +198,20 @@ services:
       retries: 15
     restart: unless-stopped
 
+  sah-mongo:
+    container_name: sah-mongo
+    image: mongo:7
+    volumes:
+      - sah_mongo:/data/db
+    ports:
+      - "127.0.0.1:27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   sah-minio-init:
     container_name: sah-minio-init
     image: minio/mc:latest
@@ -257,6 +271,8 @@ services:
       MINIO_BUCKET: sah-artifacts
       KAFKA_BROKERS: sah-kafka:9092               # override .env (which uses localhost:9094 for host-mode dev)
       KAFKA_TOPIC: sah.agent.turns
+      MONGO_URI: mongodb://sah-mongo:27017
+      MONGO_DB: sah
     ports:
       - "8080:8080"
     depends_on:
@@ -266,6 +282,8 @@ services:
         condition: service_completed_successfully
       sah-clickhouse-init:
         condition: service_completed_successfully  # schema + topic guaranteed ready
+      sah-mongo:
+        condition: service_healthy
     volumes:
       # Bind mount (not named volume) so the host path is predictable for sandbox spawning.
       # SAH_UPLOAD_HOST_DIR must match this source path.
@@ -284,4 +302,5 @@ volumes:
   sah_redis:
   sah_minio:
   sah_kafka:
+  sah_mongo:
   # sah_uploads removed — replaced by bind mount (${SAH_UPLOAD_HOST_DIR:-./tmp/uploads})

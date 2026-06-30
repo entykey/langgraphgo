@@ -17,19 +17,19 @@ const dsAPI = "https://api.deepseek.com/chat/completions"
 // ── request types ─────────────────────────────────────────────────────────────
 
 type dsChatMsg struct {
-	Role       string       `json:"role"`
-	Content    *string      `json:"content"`
-	ToolCalls  []dsToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string       `json:"tool_call_id,omitempty"`
+	Role       string       `json:"role"                   bson:"role"`
+	Content    *string      `json:"content"                bson:"content"`
+	ToolCalls  []dsToolCall `json:"tool_calls,omitempty"   bson:"tool_calls,omitempty"`
+	ToolCallID string       `json:"tool_call_id,omitempty" bson:"tool_call_id,omitempty"`
 }
 
 type dsToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
+	ID       string `json:"id"   bson:"id"`
+	Type     string `json:"type" bson:"type"`
 	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
+		Name      string `json:"name"      bson:"name"`
+		Arguments string `json:"arguments" bson:"arguments"`
+	} `json:"function" bson:"function"`
 }
 
 type dsFuncDef struct {

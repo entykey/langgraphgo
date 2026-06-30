@@ -29,9 +29,9 @@ var langfuseModels = []map[string]any{
 		"modelName":           "gemini-3.1-flash-lite",
 		"matchPattern":        `(?i)^(gemini/gemini-3\.1-flash-lite|gemini-3\.1-flash-lite)$`,
 		"unit":                "TOKENS",
-		"inputPrice":          0.00000025,   // $0.25 / 1M
-		"outputPrice":         0.0000015,    // $1.50 / 1M
-		"inputCacheReadPrice": 0.000000025,  // $0.025 / 1M (cache hit)
+		"inputPrice":          0.00000025,  // $0.25 / 1M
+		"outputPrice":         0.0000015,   // $1.50 / 1M
+		"inputCacheReadPrice": 0.000000025, // $0.025 / 1M (cache hit)
 	},
 }
 

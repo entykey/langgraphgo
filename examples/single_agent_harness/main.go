@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -38,6 +39,7 @@ func main() {
 	initSkillsDir()
 	initAgentLog()
 	initKafka()
+	initMongo()
 
 	_agentModel = getEnv("AGENT_MODEL", "deepseek-v4-flash")
 	_searchModel = getEnv("SEARCH_MODEL", "gemini-3.1-flash-lite")
@@ -61,6 +63,7 @@ func main() {
 		<-sig
 		fmt.Fprintln(os.Stderr, "\n[sah] shutting down…")
 		shutdownKafka()
+		shutdownMongo()
 		globalLF.Shutdown()
 		os.Exit(0)
 	}()
@@ -75,11 +78,14 @@ func main() {
 	mux.HandleFunc("/image/", corsMiddleware(imageHandler))
 	mux.HandleFunc("/artifact/", corsMiddleware(artifactHandler))
 	mux.HandleFunc("/config", corsMiddleware(configHandler))
+	mux.HandleFunc("/sessions", corsMiddleware(sessionsListHandler))
+	mux.HandleFunc("/sessions/", corsMiddleware(sessionDetailHandler))
 	mux.Handle("/", staticHandler())
 
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		fmt.Fprintln(os.Stderr, "server:", err)
 		shutdownKafka()
+		shutdownMongo()
 		globalLF.Shutdown()
 		os.Exit(1)
 	}
@@ -90,6 +96,7 @@ func main() {
 type chatRequest struct {
 	Message   string        `json:"message"`
 	SessionID string        `json:"session_id"`
+	RequestID string        `json:"request_id"`
 	History   []messageJSON `json:"history"`
 }
 
@@ -108,9 +115,56 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 	if req.SessionID == "" {
 		req.SessionID = lfUUID()
 	}
+	if req.RequestID == "" {
+		req.RequestID = lfUUID()
+	}
+	sessionID := req.SessionID
 
-	// Build full history including the new user message.
-	history := append(req.History, messageJSON{Role: "user", Content: req.Message})
+	// Idempotency: skip duplicate requests.
+	if isDuplicate(sessionID, req.RequestID) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, SSEEvent{Type: "session_status", Data: map[string]any{
+			"session_id": sessionID,
+			"status":     "generating",
+			"duplicate":  true,
+		}}.Encode())
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		return
+	}
+
+	// Load authoritative ds_messages from MongoDB.
+	// Fall back to building fresh if session doesn't exist yet.
+	sl := loadSessionForTurn(sessionID)
+	var dsMsgs []dsChatMsg
+	var sessionName string
+	if sl.Exists && len(sl.DSMessages) > 0 {
+		dsMsgs = sl.DSMessages
+		sessionName = sl.Name
+		// Always use current system prompt (in case it changed).
+		if len(dsMsgs) > 0 && dsMsgs[0].Role == "system" {
+			dsMsgs[0] = dsChatMsg{Role: "system", Content: strPtr(rootAgentSystem)}
+		}
+	} else {
+		dsMsgs = []dsChatMsg{{Role: "system", Content: strPtr(rootAgentSystem)}}
+		runes := []rune(req.Message)
+		if len(runes) > 60 {
+			runes = runes[:60]
+		}
+		sessionName = string(runes)
+	}
+
+	// Append new user message.
+	dsMsgs = append(dsMsgs, dsChatMsg{Role: "user", Content: strPtr(req.Message)})
+
+	// Persist user turn immediately (before generation starts).
+	if err := upsertUserTurn(sessionID, sessionName, req.RequestID, req.Message, dsMsgs); err != nil {
+		fmt.Fprintf(os.Stderr, "[mongo] upsert user turn: %v\n", err)
+	}
 
 	// SSE headers.
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -119,22 +173,80 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher, canFlush := w.(http.Flusher)
 
+	// Emit session_status so frontend updates sidebar immediately.
+	fmt.Fprint(w, SSEEvent{Type: "session_status", Data: map[string]any{
+		"session_id": sessionID,
+		"name":       sessionName,
+		"status":     "generating",
+	}}.Encode())
+	if canFlush {
+		flusher.Flush()
+	}
+
 	eventCh := make(chan SSEEvent, 512)
-	ctx, cancel := context.WithCancel(r.Context())
-	registerCancel(req.SessionID, cancel)
+
+	// CRITICAL: context.Background() so client disconnect does NOT kill generation.
+	ctx, cancel := context.WithCancel(context.Background())
+	registerCancel(sessionID, cancel)
 
 	traceID := lfUUID()
-	globalLF.TraceCreate(traceID, req.SessionID, req.Message, []string{"single-agent-harness", "go", _agentModel})
+	globalLF.TraceCreate(traceID, sessionID, req.Message, []string{"single-agent-harness", "go", _agentModel})
 
+	genDone := make(chan struct{})
+	var hbWG sync.WaitGroup
+	hbWG.Add(1)
+
+	// Heartbeat goroutine — prevents client disconnect timeout during slow generation.
 	go func() {
-		defer close(eventCh)
-		answer := runAgentTurn(ctx, req.SessionID, traceID, history, eventCh)
+		defer hbWG.Done()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				select {
+				case eventCh <- SSEEvent{Type: "heartbeat", Data: map[string]any{}}:
+				case <-genDone:
+					return
+				}
+			case <-genDone:
+				return
+			}
+		}
+	}()
+
+	// Agent goroutine — runs to completion regardless of client connection.
+	go func() {
+		defer func() {
+			deregisterCancel(sessionID)
+			cancel()
+			close(genDone)
+			hbWG.Wait()
+			close(eventCh)
+		}()
+
+		answer, hitMaxRounds, finalDSMsgs := runAgentTurn(ctx, sessionID, traceID, dsMsgs, eventCh)
+
+		stopReason := "completed"
+		switch {
+		case ctx.Err() != nil:
+			stopReason = consumeStopReason(sessionID)
+		case answer == "" && hitMaxRounds:
+			stopReason = "max_rounds"
+		case answer == "":
+			stopReason = "llm_error"
+		}
+
+		fmt.Printf("[agent] session=%s stop=%s answer_len=%d\n", sessionID[:8], stopReason, len(answer))
+		if err := upsertAssistantTurn(sessionID, answer, finalDSMsgs, stopReason); err != nil {
+			fmt.Fprintf(os.Stderr, "[mongo] upsert assistant turn: %v\n", err)
+		}
 		globalLF.TraceUpdate(traceID, answer)
-		deregisterCancel(req.SessionID)
+
+		emit(eventCh, "done", map[string]any{"text": answer, "stop_reason": stopReason})
 	}()
 
 	// Drain SSE events and forward to client.
-	// Batch consecutive token events to reduce network round-trips.
 	const idleTimeout = 150 * time.Second
 	var overflow *SSEEvent
 
@@ -146,11 +258,9 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		} else {
 			var ok bool
 			if ev, ok = recvTimeout(eventCh, idleTimeout); !ok {
-				// Channel closed.
 				break
 			}
 			if ev.Type == "" {
-				// Timeout sentinel.
 				fmt.Fprint(w, SSEEvent{Type: "error", Data: map[string]string{"message": "idle timeout"}}.Encode())
 				if canFlush {
 					flusher.Flush()
@@ -159,7 +269,6 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Drain consecutive token events.
 		if ev.Type == "token" {
 			text, _ := ev.Data.(map[string]string)["text"]
 			for {
@@ -185,11 +294,6 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		if canFlush {
 			flusher.Flush()
 		}
-	}
-
-	fmt.Fprint(w, SSEEvent{Type: "done", Data: map[string]any{}}.Encode())
-	if canFlush {
-		flusher.Flush()
 	}
 }
 
@@ -534,12 +638,94 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, PATCH, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next(w, r)
+	}
+}
+
+// ── Session REST endpoints ─────────────────────────────────────────────────────
+
+func sessionsListHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	fmt.Printf("[http] GET /sessions\n")
+	sessions, err := listSessions(50)
+	if err != nil {
+		fmt.Printf("[http] GET /sessions error: %v\n", err)
+		http.Error(w, "db error: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if sessions == nil {
+		sessions = []SessionPreview{}
+	}
+	fmt.Printf("[http] GET /sessions → %d items\n", len(sessions))
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(sessions) //nolint:errcheck
+}
+
+func sessionDetailHandler(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/sessions/")
+	parts := strings.SplitN(path, "/", 2)
+	sessionID := parts[0]
+	fmt.Printf("[http] %s /sessions/%s\n", r.Method, sessionID[:min(8, len(sessionID))])
+	if sessionID == "" {
+		http.Error(w, "missing session id", http.StatusBadRequest)
+		return
+	}
+
+	switch {
+	case r.Method == http.MethodGet && len(parts) == 1:
+		// GET /sessions/{id}
+		doc, err := getSessionDoc(sessionID)
+		if err != nil || doc == nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"session_id":       doc.SessionID,
+			"name":             doc.Name,
+			"status":           doc.Status,
+			"last_stop_reason": doc.LastStopReason,
+			"interrupted":      doc.Interrupted,
+			"updated_at":       doc.UpdatedAt,
+			"ui_messages":      doc.UIMessages,
+			"ds_messages":      doc.DSMessages,
+		})
+
+	case r.Method == http.MethodDelete && len(parts) == 1:
+		// DELETE /sessions/{id}
+		if err := deleteSessionDoc(sessionID); err != nil {
+			http.Error(w, "db error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+
+	case r.Method == http.MethodPatch && len(parts) == 2 && parts[1] == "name":
+		// PATCH /sessions/{id}/name
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+			http.Error(w, "bad request: name required", http.StatusBadRequest)
+			return
+		}
+		if err := renameSessionDoc(sessionID, body.Name); err != nil {
+			http.Error(w, "db error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true}) //nolint:errcheck
+
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
 	}
 }
 
@@ -575,28 +761,31 @@ func loadDotEnvFile(path string) bool {
 }
 
 func loadDotEnv() {
-	if cwd, err := os.Getwd(); err == nil {
-		if loadDotEnvFile(filepath.Join(cwd, ".env")) {
-			return
-		}
-	}
+	cwd, _ := os.Getwd()
+
+	// 1. cwd/.env (highest priority — overrides everything below)
+	loadDotEnvFile(filepath.Join(cwd, ".env"))
+
+	// 2. Exe's own directory (compiled binary next to its .env)
 	if exe, err := os.Executable(); err == nil {
-		if loadDotEnvFile(filepath.Join(filepath.Dir(exe), ".env")) {
-			return
-		}
+		exeDir := filepath.Dir(exe)
+		loadDotEnvFile(filepath.Join(exeDir, ".env"))
+
+		// 3. cwd/<binary-name>/.env — handles "go run ./single_agent_harness/" from examples/
+		//    Go names the temp exe after the package directory, so this resolves correctly.
+		binName := strings.TrimSuffix(filepath.Base(exe), ".exe")
+		loadDotEnvFile(filepath.Join(cwd, binName, ".env"))
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		dir := cwd
-		for i := 0; i < 4; i++ {
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-			if loadDotEnvFile(filepath.Join(dir, ".env")) {
-				return
-			}
+
+	// 4. Walk up parent directories
+	dir := cwd
+	for i := 0; i < 4; i++ {
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
 		}
+		dir = parent
+		loadDotEnvFile(filepath.Join(dir, ".env"))
 	}
 }
 

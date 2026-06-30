@@ -95,6 +95,9 @@ var (
 
 	cancelsMu sync.Mutex
 	cancels   = map[string]context.CancelFunc{}
+
+	stopReasonsMu sync.Mutex
+	stopReasons   = map[string]string{}
 )
 
 func getSessionSkills(sessionID string) map[string]bool {
@@ -122,6 +125,10 @@ func registerCancel(sessionID string, cancel context.CancelFunc) {
 }
 
 func cancelSession(sessionID string) bool {
+	stopReasonsMu.Lock()
+	stopReasons[sessionID] = "user_stopped"
+	stopReasonsMu.Unlock()
+
 	cancelsMu.Lock()
 	defer cancelsMu.Unlock()
 	if fn, ok := cancels[sessionID]; ok {
@@ -138,19 +145,30 @@ func deregisterCancel(sessionID string) {
 	delete(cancels, sessionID)
 }
 
+func consumeStopReason(sessionID string) string {
+	stopReasonsMu.Lock()
+	defer stopReasonsMu.Unlock()
+	r := stopReasons[sessionID]
+	delete(stopReasons, sessionID)
+	if r == "" {
+		return "context_error"
+	}
+	return r
+}
+
 // ── ReAct loop ────────────────────────────────────────────────────────────────
 
 // runAgentTurn runs one agent turn (ReAct loop with tool calling).
-// history is the full conversation so far (user + model turns, no tool results).
+// msgs is the full DeepSeek message slice (system + history + new user message).
 // eventCh receives SSE events; the caller drains it and writes to the HTTP response.
-// Returns the agent's final text response.
+// Returns (finalText, hitMaxRounds, finalMsgs).
 func runAgentTurn(
 	ctx context.Context,
 	sessionID string,
 	traceID string,
-	history []messageJSON,
+	msgs []dsChatMsg,
 	eventCh chan<- SSEEvent,
-) string {
+) (string, bool, []dsChatMsg) {
 	// Active skills persist across turns for this session.
 	activeSkills := getSessionSkills(sessionID)
 
@@ -171,23 +189,12 @@ func runAgentTurn(
 		}
 	}
 
-	// Convert history to DeepSeek message format.
-	msgs := make([]dsChatMsg, 0, len(history)+1)
-	msgs = append(msgs, dsChatMsg{Role: "system", Content: strPtr(rootAgentSystem)})
-	for _, m := range history {
-		role := m.Role
-		if role == "model" {
-			role = "assistant"
-		}
-		msgs = append(msgs, dsChatMsg{Role: role, Content: strPtr(m.Content)})
-	}
-
 	// Langfuse: span covering the entire agent turn.
 	spanID := lfUUID()
 	lastUser := ""
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == "user" {
-			lastUser = history[i].Content
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" && msgs[i].Content != nil {
+			lastUser = *msgs[i].Content
 			break
 		}
 	}
@@ -195,6 +202,7 @@ func runAgentTurn(
 
 	var fullText string
 	var toolsCalled []string
+	gotFinalAnswer := false
 
 	for round := 0; round < maxReActRounds; round++ {
 		fmt.Printf("[agent] round %d session=%s skills=%v\n", round+1, sessionID[:8], activeSkillsList(activeSkills))
@@ -211,9 +219,13 @@ func runAgentTurn(
 			fmt.Sprintf("round-%d", round+1), _agentModel,
 			lfDSMsgs(msgs, 10))
 
+		// Accumulate streamed tokens so partial text survives cancellation.
+		var roundBuf strings.Builder
+
 		resp, promptTok, completionTok, timing, err := dsClient.StreamChatWithTools(
 			ctx, msgs, apiTools, nil,
 			func(tok string) {
+				roundBuf.WriteString(tok)
 				emit(eventCh, "token", map[string]string{"text": tok})
 			},
 			func(idx int, name, argChunk string) {
@@ -230,10 +242,16 @@ func runAgentTurn(
 			globalLF.GenerationEnd(genID, traceID, map[string]any{"error": err.Error()}, promptTok, completionTok, time.Time{})
 			globalLF.SpanEnd(spanID, traceID, map[string]any{"error": err.Error(), "tools_called": toolsCalled})
 			if ctx.Err() != nil {
-				return fullText // cancelled — return whatever we have
+				// Save only the partial AI text streamed before cancellation.
+				// Tool chips are reconstructed from ds_messages by the frontend on reload.
+				fullText = roundBuf.String()
+				// Always close ds_messages with an assistant entry so the next turn
+				// never starts on a dangling tool_call or bare tool_result.
+				msgs = append(msgs, dsChatMsg{Role: "assistant", Content: strPtr(fullText)})
+				return fullText, false, msgs
 			}
 			emit(eventCh, "error", map[string]string{"message": err.Error()})
-			return fullText
+			return fullText, false, msgs
 		}
 
 		// Output as plain {role, content} so Langfuse renders markdown instead of a table.
@@ -274,6 +292,7 @@ func runAgentTurn(
 			if resp.Content != nil {
 				fullText = *resp.Content
 			}
+			gotFinalAnswer = true
 			break
 		}
 
@@ -299,7 +318,7 @@ func runAgentTurn(
 	if len(toolsCalled) > 0 {
 		emit(eventCh, "tools_done", map[string]any{"tools": toolsCalled})
 	}
-	return fullText
+	return fullText, !gotFinalAnswer, msgs
 }
 
 // activeToolDefs returns all ToolDefs currently in the toolMap.
