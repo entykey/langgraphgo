@@ -140,6 +140,21 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 	// Load authoritative ds_messages from MongoDB.
 	// Fall back to building fresh if session doesn't exist yet.
 	sl := loadSessionForTurn(sessionID)
+
+	// Reject new messages for permanently ended sessions.
+	if sl.Status == "ended" {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, SSEEvent{Type: "conversation_ended", Data: map[string]any{"session_id": sessionID}}.Encode())
+		fmt.Fprint(w, SSEEvent{Type: "done", Data: map[string]any{"text": "", "stop_reason": "conversation_ended"}}.Encode())
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		return
+	}
+
 	var dsMsgs []dsChatMsg
 	var sessionName string
 	if sl.Exists && len(sl.DSMessages) > 0 {
@@ -225,10 +240,12 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 			close(eventCh)
 		}()
 
-		answer, hitMaxRounds, finalDSMsgs := runAgentTurn(ctx, sessionID, traceID, dsMsgs, eventCh)
+		answer, hitMaxRounds, finalDSMsgs, endedByTool := runAgentTurn(ctx, sessionID, traceID, dsMsgs, eventCh)
 
 		stopReason := "completed"
 		switch {
+		case endedByTool:
+			stopReason = "conversation_ended"
 		case ctx.Err() != nil:
 			stopReason = consumeStopReason(sessionID)
 		case answer == "" && hitMaxRounds:

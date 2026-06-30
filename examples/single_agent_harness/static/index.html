@@ -485,6 +485,20 @@
   .compact-btn:hover:not(:disabled) { background: var(--border); color: var(--text); }
   .compact-btn:disabled { opacity: .4; cursor: not-allowed; }
 
+  /* Ended-conversation banner */
+  .ended-banner {
+    margin: 0 20px 10px;
+    padding: 9px 16px;
+    background: rgba(239,68,68,.07);
+    border: 1px solid rgba(239,68,68,.22);
+    border-radius: 8px;
+    color: #ef4444;
+    font-size: 12.5px;
+    text-align: center;
+    pointer-events: none;
+  }
+  .input-area.session-ended { opacity: .35; pointer-events: none; }
+
   /* System message (compact result, info notices) */
   .sys-msg {
     display: flex; justify-content: center; padding: 2px 0;
@@ -835,6 +849,7 @@ function toolLabel(name, extra) {
       name === "present_file")       return lbl('show', b);
   if (name === "read_image")         return lbl('vision');
   if (name === "load_skill")          return lbl('load skill');
+  if (name === "end_conversation")    return lbl('end session');
   return lbl(name);
 }
 
@@ -1261,6 +1276,27 @@ function setInputDisabled(v) {
   $stopBtn.style.display = v ? 'inline-flex' : 'none';
 }
 
+function conversationEnded() {
+  $input.disabled = true;
+  $btn.disabled = true;
+  $stopBtn.style.display = 'none';
+  const form = document.getElementById('form');
+  form.classList.add('session-ended');
+  if (!document.getElementById('ended-banner')) {
+    const banner = document.createElement('div');
+    banner.id = 'ended-banner';
+    banner.className = 'ended-banner';
+    banner.textContent = '🔒 Cuộc hội thoại này đã kết thúc vĩnh viễn.';
+    form.parentNode.insertBefore(banner, form);
+  }
+}
+
+function clearEndedState() {
+  const banner = document.getElementById('ended-banner');
+  if (banner) banner.remove();
+  document.getElementById('form').classList.remove('session-ended');
+}
+
 // ── Compact ────────────────────────────────────────────────────────────────────
 const $compactBtn = document.getElementById('compact-btn');
 
@@ -1659,6 +1695,8 @@ async function openSession(sid) {
     sessionId = doc.session_id;
     history = [];
     $msgs.innerHTML = '';
+    clearEndedState();
+    setInputDisabled(false);
 
     const dsMsgs = doc.ds_messages;
     if (dsMsgs && dsMsgs.length > 0) {
@@ -1678,7 +1716,9 @@ async function openSession(sid) {
       }
     }
 
-    if (doc.status === 'generating') {
+    if (doc.status === 'ended') {
+      conversationEnded();
+    } else if (doc.status === 'generating') {
       const b = createAiBubble('⏳ Đang sinh...');
       $aiLogo.classList.add('generating');
       setInputDisabled(true);
@@ -1728,6 +1768,8 @@ function startNewChat() {
   sessionId = crypto.randomUUID();
   history = [];
   $msgs.innerHTML = '';
+  clearEndedState();
+  setInputDisabled(false);
   updateCompactButtonState();
   renderSessionList();
 }
@@ -2184,10 +2226,18 @@ async function sendMessage(message) {
           case "heartbeat":
             break; // keep-alive, no UI action needed
 
+          case "conversation_ended":
+            commitCurrent();
+            hideFlow();
+            conversationEnded();
+            break;
+
           case "done":
             commitCurrent();
             hideFlow();
-            if (data.stop_reason && data.stop_reason !== 'completed') {
+            if (data.stop_reason === 'conversation_ended') {
+              // conversationEnded() already called via the dedicated SSE event
+            } else if (data.stop_reason && data.stop_reason !== 'completed') {
               const badge = {
                 user_stopped: '[dừng]', llm_error: '[lỗi API]',
                 max_rounds: '[vòng lặp tối đa]', context_error: '[gián đoạn]',

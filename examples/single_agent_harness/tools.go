@@ -733,12 +733,30 @@ func makeCoreTools(
 		},
 	}
 
+	// ── end_conversation ─────────────────────────────────────────────────────────
+	endConversation := ToolDef{
+		Name: "end_conversation",
+		Description: "Permanently ends the current conversation — the user will NOT be able to send any more messages in this session. " +
+			"ONLY use in 2 cases: " +
+			"(1) User has been persistently abusive AFTER a clear prior warning was issued in a previous turn, " +
+			"(2) User explicitly requests ending AND has confirmed they understand this is permanent. " +
+			"NEVER use if user shows any sign of self-harm, crisis, or intent to harm others — " +
+			"regardless of how abusive they are being.",
+		Parameters: json.RawMessage(`{"type":"object","properties":{}}`),
+		Fn: func(args map[string]any) string {
+			emit(eventCh, "conversation_ended", map[string]any{"session_id": sessionID})
+			fmt.Printf("[agent] end_conversation called for session=%s\n", sessionID[:8])
+			return "Conversation permanently ended."
+		},
+	}
+
 	return []ToolDef{
 		loadSkill, webSearch, readImage,
 		writeFile, writeCode, writeBinaryFile, zipFiles, editXlsx,
 		readExcel, executePython, executeFile,
 		readCode, patchCode, grepCode,
 		listWorkspace, presentArtifact,
+		endConversation,
 	}
 }
 

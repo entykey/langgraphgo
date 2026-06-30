@@ -128,9 +128,10 @@ type sessionLoad struct {
 	Name       string
 	DSMessages []dsChatMsg
 	Exists     bool
+	Status     string
 }
 
-// loadSessionForTurn loads name + ds_messages from MongoDB.
+// loadSessionForTurn loads name + ds_messages + status from MongoDB.
 func loadSessionForTurn(sessionID string) sessionLoad {
 	if !mongoOn {
 		fmt.Printf("[mongo:load] mongoOn=false, skip\n")
@@ -142,14 +143,14 @@ func loadSessionForTurn(sessionID string) sessionLoad {
 	var doc ConversationDoc
 	err := _mongoColl.FindOne(ctx,
 		bson.M{"session_id": sessionID},
-		options.FindOne().SetProjection(bson.M{"name": 1, "ds_messages": 1}),
+		options.FindOne().SetProjection(bson.M{"name": 1, "ds_messages": 1, "status": 1}),
 	).Decode(&doc)
 	if err != nil {
 		fmt.Printf("[mongo:load] session=%s not found: %v\n", sessionID[:8], err)
 		return sessionLoad{}
 	}
-	fmt.Printf("[mongo:load] session=%s found name=%q ds_msgs=%d\n", sessionID[:8], doc.Name, len(doc.DSMessages))
-	return sessionLoad{Name: doc.Name, DSMessages: doc.DSMessages, Exists: true}
+	fmt.Printf("[mongo:load] session=%s found name=%q ds_msgs=%d status=%s\n", sessionID[:8], doc.Name, len(doc.DSMessages), doc.Status)
+	return sessionLoad{Name: doc.Name, DSMessages: doc.DSMessages, Exists: true, Status: doc.Status}
 }
 
 // isDuplicate returns true if reqID matches the last processed request for this session.
@@ -226,9 +227,13 @@ func upsertAssistantTurn(sessionID, finalText string, finalDSMsgs []dsChatMsg, s
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	status := "idle"
+	if stopReason == "conversation_ended" {
+		status = "ended"
+	}
 	update := bson.M{
 		"$set": bson.M{
-			"status":           "idle",
+			"status":           status,
 			"last_stop_reason": stopReason,
 			"ds_messages":      finalDSMsgs,
 			"updated_at":       time.Now(),
