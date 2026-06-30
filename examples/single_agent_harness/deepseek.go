@@ -17,10 +17,11 @@ const dsAPI = "https://api.deepseek.com/chat/completions"
 // ── request types ─────────────────────────────────────────────────────────────
 
 type dsChatMsg struct {
-	Role       string       `json:"role"                   bson:"role"`
-	Content    *string      `json:"content"                bson:"content"`
-	ToolCalls  []dsToolCall `json:"tool_calls,omitempty"   bson:"tool_calls,omitempty"`
-	ToolCallID string       `json:"tool_call_id,omitempty" bson:"tool_call_id,omitempty"`
+	Role             string       `json:"role"                        bson:"role"`
+	Content          *string      `json:"content"                     bson:"content"`
+	ReasoningContent *string      `json:"reasoning_content,omitempty"  bson:"reasoning_content,omitempty"`
+	ToolCalls        []dsToolCall `json:"tool_calls,omitempty"        bson:"tool_calls,omitempty"`
+	ToolCallID       string       `json:"tool_call_id,omitempty"      bson:"tool_call_id,omitempty"`
 }
 
 type dsToolCall struct {
@@ -44,7 +45,8 @@ type dsAPITool struct {
 }
 
 type dsThinking struct {
-	Type string `json:"type"`
+	Type            string `json:"type"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type dsStreamOptions struct {
@@ -67,8 +69,9 @@ type dsReq struct {
 // ── streaming delta types ─────────────────────────────────────────────────────
 
 type dsStreamDelta struct {
-	Content   *string           `json:"content"`
-	ToolCalls []dsToolCallDelta `json:"tool_calls,omitempty"`
+	Content          *string           `json:"content"`
+	ReasoningContent *string           `json:"reasoning_content"`
+	ToolCalls        []dsToolCallDelta `json:"tool_calls,omitempty"`
 }
 
 type dsToolCallDelta struct {
@@ -122,7 +125,8 @@ func NewDSClient(key, model string) *DSClient { return &DSClient{apiKey: key, mo
 
 func strPtr(s string) *string { return &s }
 
-func noThinkDS() dsThinking { return dsThinking{Type: "disabled"} }
+func noThinkDS() dsThinking   { return dsThinking{Type: "disabled"} }
+func withThinkDS() dsThinking { return dsThinking{Type: "enabled", ReasoningEffort: "high"} }
 
 func (c *DSClient) post(ctx context.Context, req dsReq) (*dsResp, error) {
 	b, err := json.Marshal(req)
@@ -171,8 +175,7 @@ func (c *DSClient) StreamChatWithTools(
 		Messages:      messages,
 		Tools:         tools,
 		ToolChoice:    toolChoice,
-		Thinking:      noThinkDS(),
-		Temperature:   0.6,
+		Thinking:      withThinkDS(), // temperature is silently ignored when thinking is enabled
 		Stream:        true,
 		StreamOptions: &dsStreamOptions{IncludeUsage: true},
 	})
@@ -199,7 +202,7 @@ func (c *DSClient) StreamChatWithTools(
 		return nil, 0, 0, StreamTiming{}, fmt.Errorf("DeepSeek stream %d: %s", resp.StatusCode, string(data))
 	}
 
-	var contentBuf strings.Builder
+	var contentBuf, reasoningBuf strings.Builder
 	var toolCalls []dsToolCall
 	var promptTok, completionTok int
 	var firstDelta time.Time
@@ -229,10 +232,15 @@ func (c *DSClient) StreamChatWithTools(
 		}
 		delta := chunk.Choices[0].Delta
 
+		// TTFT tracks first visible token (content/tool), not reasoning tokens.
 		hasContent := (delta.Content != nil && *delta.Content != "") || len(delta.ToolCalls) > 0
 		if firstDelta.IsZero() && hasContent {
 			firstDelta = time.Now()
 			ttftMS = float64(firstDelta.Sub(t0).Milliseconds())
+		}
+
+		if delta.ReasoningContent != nil && *delta.ReasoningContent != "" {
+			reasoningBuf.WriteString(*delta.ReasoningContent)
 		}
 
 		for _, tc := range delta.ToolCalls {
@@ -272,6 +280,9 @@ func (c *DSClient) StreamChatWithTools(
 	msg := &dsChatMsg{Role: "assistant"}
 	if s := contentBuf.String(); s != "" {
 		msg.Content = &s
+	}
+	if s := reasoningBuf.String(); s != "" {
+		msg.ReasoningContent = &s
 	}
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
