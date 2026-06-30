@@ -104,6 +104,14 @@ type dsResp struct {
 
 // ── client ────────────────────────────────────────────────────────────────────
 
+// StreamTiming holds timing metrics captured during one StreamChatWithTools call.
+type StreamTiming struct {
+	FirstDelta time.Time // absolute wall time of first content or tool-call token (for Langfuse)
+	ConnectMS  float64   // HTTP request start → response headers received (ms)
+	TTFT_MS    float64   // HTTP request start → first content or tool-call token (ms)
+	GenMS      float64   // HTTP request start → stream EOF (ms)
+}
+
 // DSClient makes HTTP calls to the DeepSeek REST API.
 type DSClient struct {
 	apiKey string
@@ -157,7 +165,7 @@ func (c *DSClient) StreamChatWithTools(
 	toolChoice any,
 	onToken func(string),
 	onToolDelta func(index int, name, argChunk string),
-) (*dsChatMsg, int, int, time.Time, error) {
+) (*dsChatMsg, int, int, StreamTiming, error) {
 	b, err := json.Marshal(dsReq{
 		Model:         c.model,
 		Messages:      messages,
@@ -169,29 +177,33 @@ func (c *DSClient) StreamChatWithTools(
 		StreamOptions: &dsStreamOptions{IncludeUsage: true},
 	})
 	if err != nil {
-		return nil, 0, 0, time.Time{}, err
+		return nil, 0, 0, StreamTiming{}, err
 	}
 	hr, err := http.NewRequestWithContext(ctx, "POST", dsAPI, bytes.NewReader(b))
 	if err != nil {
-		return nil, 0, 0, time.Time{}, err
+		return nil, 0, 0, StreamTiming{}, err
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	hr.Header.Set("Authorization", "Bearer "+c.apiKey)
 
+	t0 := time.Now() // measure from here: includes DNS, TLS, request send
 	resp, err := http.DefaultClient.Do(hr)
 	if err != nil {
-		return nil, 0, 0, time.Time{}, err
+		return nil, 0, 0, StreamTiming{}, err
 	}
+	connectMS := float64(time.Since(t0).Milliseconds()) // headers received = connection established
+
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		data, _ := io.ReadAll(resp.Body)
-		return nil, 0, 0, time.Time{}, fmt.Errorf("DeepSeek stream %d: %s", resp.StatusCode, string(data))
+		return nil, 0, 0, StreamTiming{}, fmt.Errorf("DeepSeek stream %d: %s", resp.StatusCode, string(data))
 	}
 
 	var contentBuf strings.Builder
 	var toolCalls []dsToolCall
 	var promptTok, completionTok int
 	var firstDelta time.Time
+	var ttftMS float64
 
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
@@ -220,6 +232,7 @@ func (c *DSClient) StreamChatWithTools(
 		hasContent := (delta.Content != nil && *delta.Content != "") || len(delta.ToolCalls) > 0
 		if firstDelta.IsZero() && hasContent {
 			firstDelta = time.Now()
+			ttftMS = float64(firstDelta.Sub(t0).Milliseconds())
 		}
 
 		for _, tc := range delta.ToolCalls {
@@ -246,7 +259,14 @@ func (c *DSClient) StreamChatWithTools(
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, 0, 0, time.Time{}, fmt.Errorf("stream scan: %w", err)
+		return nil, 0, 0, StreamTiming{}, fmt.Errorf("stream scan: %w", err)
+	}
+
+	timing := StreamTiming{
+		FirstDelta: firstDelta,
+		ConnectMS:  connectMS,
+		TTFT_MS:    ttftMS,
+		GenMS:      float64(time.Since(t0).Milliseconds()),
 	}
 
 	msg := &dsChatMsg{Role: "assistant"}
@@ -256,7 +276,7 @@ func (c *DSClient) StreamChatWithTools(
 	if len(toolCalls) > 0 {
 		msg.ToolCalls = toolCalls
 	}
-	return msg, promptTok, completionTok, firstDelta, nil
+	return msg, promptTok, completionTok, timing, nil
 }
 
 // Summarize calls DeepSeek non-streaming for text summarization.
@@ -264,7 +284,7 @@ func (c *DSClient) StreamChatWithTools(
 func (c *DSClient) Summarize(ctx context.Context, prompt string, onToken func(string)) (string, error) {
 	msgs := []dsChatMsg{{Role: "user", Content: strPtr(prompt)}}
 	var sb strings.Builder
-	resp, _, _, _, err := c.StreamChatWithTools(ctx, msgs, nil, nil,
+	resp, _, _, _, err := c.StreamChatWithTools(ctx, msgs, nil, nil, //nolint:dogsled
 		func(tok string) {
 			sb.WriteString(tok)
 			if onToken != nil {

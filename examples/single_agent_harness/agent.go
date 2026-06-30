@@ -211,7 +211,7 @@ func runAgentTurn(
 			fmt.Sprintf("round-%d", round+1), _agentModel,
 			lfDSMsgs(msgs, 10))
 
-		resp, promptTok, completionTok, firstDelta, err := dsClient.StreamChatWithTools(
+		resp, promptTok, completionTok, timing, err := dsClient.StreamChatWithTools(
 			ctx, msgs, apiTools, nil,
 			func(tok string) {
 				emit(eventCh, "token", map[string]string{"text": tok})
@@ -248,7 +248,20 @@ func runAgentTurn(
 			}
 			assistantOut["content"] = fmt.Sprintf("[tool calls: %v]", names)
 		}
-		globalLF.GenerationEnd(genID, traceID, assistantOut, promptTok, completionTok, firstDelta)
+		globalLF.GenerationEnd(genID, traceID, assistantOut, promptTok, completionTok, timing.FirstDelta)
+
+		logRound(roundLog{
+			SessionID:   sessionID,
+			Round:       round + 1,
+			UserMsg:     lastUser,
+			GatewayURL:  dsAPI,
+			ConnectMS:   timing.ConnectMS,
+			TTFT_MS:     timing.TTFT_MS,
+			GenMS:       timing.GenMS,
+			PromptTok:   promptTok,
+			CompleteTok: completionTok,
+			HasTools:    len(resp.ToolCalls) > 0,
+		})
 
 		emit(eventCh, "usage", map[string]any{
 			"agent": "root", "prompt_tok": promptTok, "completion_tok": completionTok,

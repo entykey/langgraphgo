@@ -15,8 +15,10 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -34,6 +36,8 @@ var (
 func main() {
 	loadDotEnv()
 	initSkillsDir()
+	initAgentLog()
+	initKafka()
 
 	_agentModel = getEnv("AGENT_MODEL", "deepseek-v4-flash")
 	_searchModel = getEnv("SEARCH_MODEL", "gemini-3.1-flash-lite")
@@ -50,6 +54,17 @@ func main() {
 	fmt.Printf("  search = gemini/%s\n", _searchModel)
 	fmt.Printf("  skills = %s\n", skillsDir)
 
+	// Flush Kafka on Ctrl+C / SIGTERM before exit.
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		<-sig
+		fmt.Fprintln(os.Stderr, "\n[sah] shutting down…")
+		shutdownKafka()
+		globalLF.Shutdown()
+		os.Exit(0)
+	}()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/chat", corsMiddleware(chatHandler))
 	mux.HandleFunc("/compact", corsMiddleware(compactHandler))
@@ -64,6 +79,7 @@ func main() {
 
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		fmt.Fprintln(os.Stderr, "server:", err)
+		shutdownKafka()
 		globalLF.Shutdown()
 		os.Exit(1)
 	}
