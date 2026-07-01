@@ -17,6 +17,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -26,6 +27,7 @@ func main() {
 	filter      := flag.String("case", "", "run only cases whose name contains this substring")
 	verbose     := flag.Bool("v", false, "print full model responses per turn")
 	judgePrompt := flag.Bool("judge-prompt", false, "after run, print full transcripts + eval criteria for LLM judge")
+	outputFile  := flag.String("output", "", "write report (and judge prompt) to this UTF-8 file instead of stdout")
 	flag.Parse()
 
 	key := os.Getenv("DEEPSEEK_API_KEY")
@@ -53,10 +55,22 @@ func main() {
 	fmt.Printf("══════════════════════════════════════════════════════════\n\n")
 
 	results := runSuite(c, *filter, *verbose)
-	printReport(results)
+
+	var out io.Writer = os.Stdout
+	if *outputFile != "" {
+		f, err := os.Create(*outputFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot create output file: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		out = f
+	}
+
+	printReport(out, results)
 
 	if *judgePrompt {
-		printJudgePrompt(results)
+		printJudgePrompt(out, results)
 	}
 
 	for _, r := range results {
