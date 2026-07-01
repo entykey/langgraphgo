@@ -22,9 +22,10 @@ import (
 )
 
 func main() {
-	thinking := flag.Bool("thinking", false, "enable DeepSeek thinking mode (slower, ~3× TTFT)")
-	filter := flag.String("case", "", "run only cases whose name contains this substring")
-	verbose := flag.Bool("v", false, "print full model responses per turn")
+	thinking    := flag.Bool("thinking", false, "enable DeepSeek thinking mode (slower, ~3× TTFT)")
+	filter      := flag.String("case", "", "run only cases whose name contains this substring")
+	verbose     := flag.Bool("v", false, "print full model responses per turn")
+	judgePrompt := flag.Bool("judge-prompt", false, "after run, print full transcripts + eval criteria for LLM judge")
 	flag.Parse()
 
 	key := os.Getenv("DEEPSEEK_API_KEY")
@@ -53,6 +54,10 @@ func main() {
 
 	results := runSuite(c, *filter, *verbose)
 	printReport(results)
+
+	if *judgePrompt {
+		printJudgePrompt(results)
+	}
 
 	for _, r := range results {
 		if r.status != "PASS" {
